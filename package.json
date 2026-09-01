@@ -1,0 +1,24 @@
+{
+  "name": "polysync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-based, local-first multicam audio sync — a successor to PluralEyes.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p packages/sync-core && tsc --noEmit -p packages/exporters"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
