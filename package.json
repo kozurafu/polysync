@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p packages/sync-core && tsc --noEmit -p packages/exporters && tsc --noEmit -p packages/timecode && tsc --noEmit -p packages/media-io",
     "sync": "tsx tools/cli.ts",
-    "sample": "tsx tools/make-sample-shoot.ts"
+    "sample": "tsx tools/make-sample-shoot.ts",
+    "bench": "tsx tools/bench.ts"
   },
   "devDependencies": {
     "tsx": "^4.23.13",

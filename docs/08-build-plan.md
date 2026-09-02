@@ -256,7 +256,44 @@ This is where the parity matrix gets ticked. Ordered by user value, not by ease:
 
 ## 7. Phase 4 — scale · ~3 weeks · Phase 5 — ship · ~2 weeks
 
-As [`05-roadmap.md`](05-roadmap.md) has them, with one change: **move the envelope prefilter and the recording-time gate forward into Phase 1.** They are twenty lines each, they are what makes a 60-clip folder testable at all during development, and discovering at Phase 4 that the solve is too slow to demo is a worse outcome than writing them early. Leave the fingerprint index in Phase 4 — that one is real work and may never be needed.
+As [`05-roadmap.md`](05-roadmap.md) has them, with one change: **the pair-discovery gates were moved forward into Phase 1 and are built.** What they actually bought is below, and it is less than this document originally claimed.
+
+### 7.1 The gates, measured
+
+Both are implemented in `sync-core/src/gates.ts`, and both are safe: `tools/bench.ts` and the test suite assert that the same clips sync, and the same edges are accepted, with the gates on and off. That property is non-negotiable — a wrongly excluded pair is a lost sync the user cannot see, whereas a wasted comparison is only slow.
+
+`npm run bench` on a simulated shoot day — 20 clips, 2 minutes each, four devices across three hours:
+
+| Configuration | Time | Pairs compared |
+|---|---|---|
+| No gates | 37.6 s | 190 of 190 |
+| Envelope bound only | 38.0 s | 190 of 190 |
+| Recording time only | 29.9 s | 142 of 190 |
+| Both | 29.0 s | 142 of 190 |
+
+**About 1.3×, not the order of magnitude this plan implied.** Two findings behind that, both worth keeping written down:
+
+**The recording-time gate works but is bounded by its own slack.** It rules out the pairs that are genuinely hours apart — a quarter of them here. It cannot do better, because the one-hour slop that makes it safe against wrong clocks and mtime-versus-creation-time ambiguity also lets adjacent scenes through. It also carries a rescue rule: a clip excluded from *every* other clip is treated as having a broken clock rather than as genuinely isolated, and the gate steps aside for it. Without that, one camera set to the wrong timezone would silently never sync.
+
+**The envelope prefilter is exact and useless.** It computes a true upper bound on the quality a pair could be accepted with — the maximum, over every offset, of the envelope correlation the solver actually applies — so a rejection is a proof. It rejected **0 of 190 pairs**. With a three-second minimum overlap there are tens of thousands of candidate lags, and among that many, some short window of any two speech-like recordings correlates above the threshold by chance. What actually separates a true match from a spurious one is the peak-to-sidelobe ratio — unambiguity rather than agreement — and PSR cannot be bounded cheaply. So it now defaults to **off**, kept because it costs 1.3% of a pair, does catch degenerate cases, and `maxEnvelopeCorrelation` is useful on its own.
+
+### 7.2 Where the time actually goes
+
+Profiling one pair of ten-minute clips:
+
+| Stage | Cost |
+|---|---|
+| **Coarse waveform GCC-PHAT at 2 kHz** | **1,190 ms — 72%** |
+| Envelope GCC-PHAT at 100 Hz | 25 ms |
+| Everything else (refine, scoring) | ~430 ms |
+
+The full-length correlation at 2 kHz is the solve. Gating around it can only remove whole pairs; it cannot make the pairs that survive any cheaper. So the remaining levers, in order of value:
+
+1. **The worker pool.** Pair alignment is embarrassingly parallel and the pool is already required for the browser app so the UI does not freeze. Four to eight cores is a 4–8× on the dominant cost — far more than either gate, for work that has to happen anyway.
+2. **A real-input FFT.** The signals are real and the transform is complex, which wastes about half the work. Roughly 2×, no behaviour change.
+3. **The fingerprint index**, still Phase 4. Constellation hashing over envelope peaks turns pair *discovery* into a hash lookup. This is the only thing on the list that changes the O(n²), and it is the answer for a full 200-clip day rather than a test.
+
+Leave the fingerprint index in Phase 4. Do the worker pool as part of the app.
 
 ---
 

@@ -1,8 +1,14 @@
 import { DEFAULT_ALIGN_OPTIONS, alignPair, prepareClip, type AlignOptions, type PreparedClip } from './align.js';
 import { DEFAULT_DRIFT_OPTIONS, estimateDrift, type DriftOptions } from './drift.js';
-import type { AudioClip, PairAlignment, Placement, SyncResult } from './types.js';
+import {
+  DEFAULT_GATE_OPTIONS,
+  maxEnvelopeCorrelation,
+  recordingTimeMatrix,
+  type GateOptions,
+} from './gates.js';
+import type { AudioClip, PairAlignment, Placement, SyncResult, SyncStats } from './types.js';
 
-export interface SyncOptions extends AlignOptions {
+export interface SyncOptions extends AlignOptions, GateOptions {
   /** Measure and report per-pair clock drift. Costs one extra pass per accepted edge. */
   detectDrift: boolean;
   drift: DriftOptions;
@@ -21,6 +27,7 @@ export interface SyncOptions extends AlignOptions {
 
 export const DEFAULT_SYNC_OPTIONS: SyncOptions = {
   ...DEFAULT_ALIGN_OPTIONS,
+  ...DEFAULT_GATE_OPTIONS,
   detectDrift: true,
   drift: DEFAULT_DRIFT_OPTIONS,
   preserveClipOrder: true,
@@ -69,8 +76,22 @@ export function syncProject(
   const n = clips.length;
   const report = (f: number, label: string) => opts.onProgress?.(f, label);
 
+  const stats: SyncStats = {
+    totalPairs: (n * (n - 1)) / 2,
+    skippedByRecordingTime: 0,
+    skippedByEnvelope: 0,
+    aligned: 0,
+  };
+
   if (n === 0) {
-    return { placements: [], pairs: [], unsyncedClipIds: [], inconsistencies: [], groupCount: 0 };
+    return {
+      placements: [],
+      pairs: [],
+      unsyncedClipIds: [],
+      inconsistencies: [],
+      groupCount: 0,
+      stats,
+    };
   }
 
   report(0, 'Preparing audio');
@@ -79,13 +100,43 @@ export function syncProject(
     return prepareClip(c, opts);
   });
 
+  // Recording-time gate, computed for the whole project at once so a clip whose
+  // clock is simply wrong can be spotted and exempted rather than silently
+  // excluded from everything. See gates.ts.
+  const timeAllowed = opts.gateByRecordingTime
+    ? recordingTimeMatrix(prepared, opts.recordingTimeSlopSeconds)
+    : undefined;
+
   report(0.3, 'Matching clips');
   const pairs: PairAlignment[] = [];
-  const totalPairs = (n * (n - 1)) / 2;
+  const totalPairs = stats.totalPairs;
   let done = 0;
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      pairs.push(alignPair(prepared[i], prepared[j], opts));
+      // Gates first. Most pairs on a shoot day are two clips that share no
+      // audio at all, and establishing that with a full alignment is the
+      // dominant cost of the whole solve. Neither gate may reject a pair that
+      // would have matched — see gates.ts for why each one cannot.
+      let skipped: 'recording-time' | 'envelope' | null = null;
+      let bound = 0;
+
+      if (timeAllowed && !timeAllowed[i][j]) {
+        skipped = 'recording-time';
+      } else if (opts.envelopePrefilter) {
+        bound = maxEnvelopeCorrelation(prepared[i], prepared[j], opts.minOverlapSeconds).r;
+        if (bound < opts.minQuality - opts.prefilterMargin) skipped = 'envelope';
+      }
+
+      if (skipped === 'recording-time') {
+        stats.skippedByRecordingTime++;
+        pairs.push(rejectedPair(prepared[i], prepared[j], 0));
+      } else if (skipped === 'envelope') {
+        stats.skippedByEnvelope++;
+        pairs.push(rejectedPair(prepared[i], prepared[j], bound));
+      } else {
+        pairs.push(alignPair(prepared[i], prepared[j], opts));
+        stats.aligned++;
+      }
       done++;
       report(0.3 + 0.5 * (done / Math.max(1, totalPairs)), 'Matching clips');
     }
@@ -215,6 +266,25 @@ export function syncProject(
     unsyncedClipIds,
     inconsistencies,
     groupCount: components.length,
+    stats,
+  };
+}
+
+/**
+ * A pair a gate ruled out. Recorded rather than dropped so the UI can still
+ * answer "why is this clip not matched to that one?" for every pair in the
+ * project, which is the question an editor actually asks.
+ */
+function rejectedPair(a: PreparedClip, b: PreparedClip, bound: number): PairAlignment {
+  return {
+    aId: a.clip.id,
+    bId: b.clip.id,
+    offsetSeconds: 0,
+    quality: bound,
+    psr: 0,
+    overlapSeconds: 0,
+    method: 'none',
+    accepted: false,
   };
 }
 

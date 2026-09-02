@@ -48,6 +48,18 @@ export interface Placement {
   driftPpm?: number;
 }
 
+/** What the pair-discovery gates did. Useful for diagnosing a slow or sparse solve. */
+export interface SyncStats {
+  /** n(n-1)/2 — every pair that existed. */
+  totalPairs: number;
+  /** Ruled out because the two recording windows cannot intersect. */
+  skippedByRecordingTime: number;
+  /** Ruled out because no offset could reach the acceptance threshold. */
+  skippedByEnvelope: number;
+  /** Pairs that were actually aligned. */
+  aligned: number;
+}
+
 export interface SyncResult {
   placements: Placement[];
   pairs: PairAlignment[];
@@ -56,4 +68,5 @@ export interface SyncResult {
   /** Edges whose implied offset disagrees with the solved timeline. */
   inconsistencies: Array<{ aId: string; bId: string; errorSeconds: number }>;
   groupCount: number;
+  stats: SyncStats;
 }

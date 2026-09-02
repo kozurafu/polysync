@@ -46,8 +46,9 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 
 ```bash
 npm install
-npm test                       # 102 tests across all four packages
+npm test                       # 121 tests across all four packages
 npm run typecheck
+npm run bench                  # solve time on a simulated shoot day
 ```
 
 ### Sync a folder from the command line

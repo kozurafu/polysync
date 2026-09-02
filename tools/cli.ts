@@ -213,6 +213,19 @@ function report(result: SyncResult, clips: AudioClip[], options: Options): void 
   const synced = result.placements.filter((p) => p.synced).length;
   console.log(`  ${synced} of ${result.placements.length} clips synced in ${result.groupCount} group(s)`);
 
+  const { stats } = result;
+  const skipped = stats.skippedByRecordingTime + stats.skippedByEnvelope;
+  if (skipped > 0) {
+    console.log(
+      `  ${stats.aligned} of ${stats.totalPairs} pairs compared; ` +
+        `${skipped} ruled out in advance ` +
+        `(${stats.skippedByRecordingTime} on recording time, ` +
+        `${stats.skippedByEnvelope} on envelope bound)`,
+    );
+  } else {
+    console.log(`  ${stats.aligned} of ${stats.totalPairs} pairs compared`);
+  }
+
   if (result.unsyncedClipIds.length) {
     console.log(`\n  Unsynced — nothing matched these, and they need a human:`);
     for (const id of result.unsyncedClipIds) console.log(`    ${names.get(id) ?? id}`);
