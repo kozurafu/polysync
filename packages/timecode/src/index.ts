@@ -111,3 +111,6 @@ export function secondsToTimecode(seconds: number, rate: FrameRate): string {
 export function timecodeToSeconds(tc: string, rate: FrameRate): number {
   return framesToSeconds(timecodeToFrames(tc, rate), rate);
 }
+
+export * from './bwf.js';
+export * from './tmcd.js';

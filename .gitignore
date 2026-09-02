@@ -7,3 +7,4 @@ coverage/
 .env
 .env.local
 /media-fixtures/
+/sample-shoot/

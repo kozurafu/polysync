@@ -61,17 +61,30 @@ Those four are the product. "Syncs audio" is table stakes and always was. Treat 
 
 ### 2.1 Work breakdown
 
-| # | File | What it does | Depends on |
+| # | File | What it does | State |
 |---|---|---|---|
-| 1.1 | `media-io/src/probe.ts` | `mediabunny` `Input` over `BlobSource`. Duration, tracks, sample rate, channels, codec, dimensions, frame rate. Never reads more than headers | — |
-| 1.2 | `timecode/src/tmcd.ts` | Walk MOV/MP4 atoms for the `hdlr`-type-`tmcd` track; read `timeScale`, `frameDuration`, `numberOfFrames`, drop-frame flag from `stsd`; read the single big-endian `uint32` sample. **No library does this** — verified absent from both mp4box.js and mediabunny | — |
-| 1.3 | `timecode/src/bwf.ts` | Walk RIFF chunks in the first ~1 MB via `file.slice()`. `bext.TimeReference` (u64, low/high split) ÷ sample rate. iXML `<SPEED><TIMECODE_RATE>`, `<TIMECODE_FLAG>`, and `<TRACK_LIST>` channel names | — |
-| 1.4 | `media-io/src/decode.ts` | Rung ladder: mediabunny software PCM → WebCodecs `AudioDecoder` (always gate on `isConfigSupported()`) → lazy `libav.js`. Emits interleaved `Float32Array` blocks | 1.1 |
-| 1.5 | `media-io/src/derive.ts` | Mono downmix, anti-aliased decimation to 2 kHz, 100 Hz log-energy envelope. **Reuse `sync-core/dsp.ts` — do not reimplement** | 1.4 |
-| 1.6 | `media-io/src/cache.ts` | OPFS store keyed by `(name, size, lastModified)`. Writes decimation + envelope + probe metadata. LRU eviction | 1.5 |
-| 1.7 | `media-io/src/pool.ts` | Worker pool, `min(hardwareConcurrency - 1, 8)`. Transferable buffers, per-file progress, cancellation | 1.4–1.6 |
-| 1.8 | `media-io/src/group.ts` | Device grouping, in precedence order: card structure (AVCHD / P2 `Contents` / XDCAM `BPAV` / CanonXF / DCIM) → filename prefix → container metadata (`©mak`/`©mod`) → extension class. **Every decision overridable** — PluralEyes' was not, and that is a documented complaint | 1.1 |
-| 1.9 | `tools/cli.ts` | Node harness: point at a folder, print a report of offsets, quality, drift, unsynced, inconsistencies. **Build this first, use it throughout** | all |
+| 1.1 | `media-io/src/ingest.ts` | `mediabunny` `Input` over `BlobSource`. Duration, tracks, sample rate, channels, codec, dimensions, frame rate. Never reads more than headers | **Done** |
+| 1.2 | `timecode/src/tmcd.ts` | Walk MOV/MP4 atoms for the `hdlr`-type-`tmcd` track; read `timeScale`, `frameDuration`, `numberOfFrames`, drop-frame flag from `stsd`; read the single big-endian `uint32` sample. **No library does this** — verified absent from both mp4box.js and mediabunny | **Done** |
+| 1.3 | `timecode/src/bwf.ts` | Walk RIFF chunks in the first ~1 MB via `file.slice()`. `bext.TimeReference` (u64, low/high split) ÷ sample rate. iXML `<SPEED><TIMECODE_RATE>`, `<TIMECODE_FLAG>`, and `<TRACK_LIST>` channel names | **Done** |
+| 1.4 | `media-io/src/container.ts` | Rung ladder: mediabunny software PCM → WebCodecs `AudioDecoder` (always gate on `isConfigSupported()`) → lazy `libav.js`. Emits interleaved `Float32Array` blocks | **Done** for PCM; compressed audio needs WebCodecs |
+| 1.5 | `media-io/src/derive.ts` | Mono downmix, anti-aliased decimation to 2 kHz, 100 Hz log-energy envelope. **Reuse `sync-core/dsp.ts` — do not reimplement** | **Done** |
+| 1.6 | `media-io/src/cache.ts` | OPFS store keyed by `(name, size, lastModified)`. Writes decimation + envelope + probe metadata. LRU eviction | Not started |
+| 1.7 | `media-io/src/pool.ts` | Worker pool, `min(hardwareConcurrency - 1, 8)`. Transferable buffers, per-file progress, cancellation | Not started |
+| 1.8 | `media-io/src/group.ts` | Device grouping, in precedence order: card structure (AVCHD / P2 `Contents` / XDCAM `BPAV` / CanonXF / DCIM) → **top-level folder** → filename reel (Canon `A001C002` splits to reel `A001`) → container metadata → picture-vs-sound. **Every decision carries the basis it was made on**, so the UI can show why and let the user change it — PluralEyes' grouping was not overridable, and that is a documented complaint | **Done** |
+| 1.9 | `tools/cli.ts` | Node harness: point at a folder, print a report of offsets, quality, drift, unsynced, inconsistencies. **Build this first, use it throughout** | **Done** |
+
+**Where it stands.** Seven of the nine are written and tested. Four files not
+on the original list turned out to be needed: `source.ts` (the `ByteSource`
+interface every parser reads through, which is what lets the CLI and the browser
+run identical code), `wav.ts`, `iso.ts` and `identity.ts`. 102 tests pass. What
+is left in this phase is the OPFS analysis cache and the worker pool — both
+browser-side, and neither needed by the CLI.
+
+**One deliberate deviation from the plan above.** A *top-level folder* strategy
+was inserted between card structure and filename prefix. The plan did not have
+one, but dropping a folder of `CAM_A/`, `CAM_B/`, `REC/` is how people actually
+organise a shoot, and on that layout filename prefixes are noise. Card structure
+still wins where it exists.
 
 ### 2.2 Why the CLI harness comes first
 

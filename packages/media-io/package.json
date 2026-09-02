@@ -6,5 +6,12 @@
   "description": "Container probing, demuxing and audio decode. The only package that knows what a codec is.",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "exports": { ".": "./src/index.ts" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@polysync/sync-core": "*",
+    "@polysync/timecode": "*",
+    "mediabunny": "^1.55.5"
+  }
 }

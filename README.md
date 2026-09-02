@@ -21,11 +21,12 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 
 | Package | State |
 |---|---|
-| `packages/sync-core` | **Working.** GCC-PHAT alignment, envelope fallback, drift estimation, whole-project graph solve. 22 tests, zero dependencies. |
+| `packages/sync-core` | **Working.** GCC-PHAT alignment, envelope fallback, drift estimation, whole-project graph solve. Zero dependencies. |
 | `packages/exporters` | **Working** for FCP7 XML (Premiere / Resolve) and CMX3600 EDL. FCPXML pending. |
-| `packages/timecode` | **Working** for SMPTE arithmetic, including drop-frame. `tmcd` and BWF `bext`/iXML parsers to come. |
-| `packages/media-io` | Stub. Demux/decode adapters over mediabunny + WebCodecs. |
+| `packages/timecode` | **Working.** SMPTE arithmetic including drop-frame, QuickTime `tmcd` timecode tracks, and BWF `bext` + iXML (start timecode, frame rate, per-channel names). Zero dependencies. |
+| `packages/media-io` | **Working for PCM.** WAV/BWF/RF64 read directly, containers via `mediabunny`, streaming decimation, device grouping, file identity and relinking. Compressed audio needs WebCodecs, so it decodes in a browser but not in Node. OPFS cache and worker pool still to come. |
 | `apps/web` | Stub. |
+| `tools/` | **Working.** CLI harness: point it at a folder, get a synced timeline report. |
 
 ## Documentation
 
@@ -45,8 +46,39 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 
 ```bash
 npm install
-npm test          # runs the sync-core and exporters suites
+npm test                       # 102 tests across all four packages
+npm run typecheck
 ```
+
+### Sync a folder from the command line
+
+There is no UI yet, but the engine is usable today. Generate a synthetic shoot
+and solve it:
+
+```bash
+npm run sample -- ./sample-shoot   # a recorder, three cameras, one stray file
+npm run sync   -- ./sample-shoot
+```
+
+```
+Timeline
+  START        DEVICE          CLIP                     QUALITY
+  0:00.000    REC             MIX_001.WAV              0.916
+  0:06.000    CAM_A           A001C001.WAV             0.997
+  0:13.000    CAM_B           B001C001.WAV             0.997
+  0:40.000    CAM_C           C001C001.WAV             0.997
+  1:20.000    CAM_A           A001C002.WAV             0.997
+! 2:35.000    STRAY           ELSEWHERE.WAV            —
+
+  5 of 6 clips synced in 2 group(s)
+
+  Unsynced — nothing matched these, and they need a human:
+    ELSEWHERE.WAV
+```
+
+Point it at real rushes the same way. Node has no WebCodecs, so compressed
+audio does not decode there — the CLI names each file it had to skip and why.
+WAV, BWF and LPCM in a container all work, which covers every sound recorder.
 
 The sync engine is pure TypeScript with no dependencies, so it runs unchanged in Node, a Web Worker, and the browser main thread:
 
