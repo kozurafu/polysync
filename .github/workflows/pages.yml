@@ -1,8 +1,10 @@
 # Publish the web app to GitHub Pages.
 #
-# Inert until Pages is switched on for the repository:
-#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
-# Until then this workflow builds and uploads, and deployment is skipped.
+# The first run switches Pages on for the repository itself (see `enablement`
+# below), so there is no manual settings step. The published site lands at
+# https://<owner>.github.io/<repo>/ — a project site, served from a subpath,
+# which is why vite.config.ts sets `base: './'` and why `npm run smoke --
+# <folder> --base=/polysync` exists to test exactly that case.
 #
 # The app is entirely static — no server, no API, no upload — so any static
 # host works. Netlify and Cloudflare Pages need only: build `npm run build`,
@@ -10,9 +12,13 @@
 
 name: Deploy web app
 
+# Build on any branch so a broken build is caught early, but only deploy from
+# the repository's default branch. Written as a job condition rather than a
+# branch filter because this repository's default branch is not called `main`,
+# and GitHub Pages refuses deployments from anything but the default branch.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
@@ -35,13 +41,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # enablement: true switches Pages on for the repository via the API on
+      # the first run, so there is no manual settings step. Needs `pages: write`
+      # above, and admin on the repo. If it fails, turn Pages on by hand:
+      # Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: apps/web/dist
 
   deploy:
     needs: build
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     environment:
       name: github-pages

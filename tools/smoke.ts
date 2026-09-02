@@ -15,8 +15,20 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { chromium, type Browser } from 'playwright';
 
-const DIST = resolve('apps/web/dist');
+// POLYSYNC_DIST points the test at any built copy — used to verify the
+// distributable zip itself, not just the folder it was made from.
+const DIST = resolve(process.env.POLYSYNC_DIST ?? 'apps/web/dist');
 const PORT = 4319;
+
+/**
+ * Optional path prefix to serve the site under.
+ *
+ * A GitHub Pages *project* site lives at `/<repo>/`, not at the domain root, so
+ * every asset and — the part that actually breaks — every worker URL has to
+ * resolve relative to the page. `npm run smoke -- <folder> --base /polysync`
+ * reproduces that exactly.
+ */
+const BASE = (process.argv.find((a) => a.startsWith('--base='))?.split('=')[1] ?? '').replace(/\/$/, '');
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -30,7 +42,19 @@ function serve(): ReturnType<typeof createServer> {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
-      const path = url.pathname === '/' ? '/index.html' : url.pathname;
+      let path = url.pathname;
+      if (BASE) {
+        if (path === BASE) {
+          res.writeHead(302, { location: `${BASE}/` }).end();
+          return;
+        }
+        if (!path.startsWith(`${BASE}/`)) {
+          res.writeHead(404).end('outside base path');
+          return;
+        }
+        path = path.slice(BASE.length);
+      }
+      if (path === '/' || path === '') path = '/index.html';
       const file = join(DIST, decodeURIComponent(path));
       if (!file.startsWith(DIST)) {
         res.writeHead(403).end();
@@ -61,7 +85,8 @@ async function mediaFilesIn(root: string): Promise<string[]> {
 }
 
 async function main(): Promise<void> {
-  const root = resolve(process.argv[2] ?? './sample-shoot');
+  const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+  const root = resolve(positional[0] ?? './sample-shoot');
   try {
     await stat(root);
   } catch {
@@ -92,8 +117,8 @@ async function main(): Promise<void> {
     });
     page.on('pageerror', (err) => consoleErrors.push(String(err)));
 
-    await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle' });
-    console.log('Loaded the app');
+    await page.goto(`http://localhost:${PORT}${BASE}/`, { waitUntil: 'networkidle' });
+    console.log(`Loaded the app from http://localhost:${PORT}${BASE}/`);
 
     // Hand the folder itself to the hidden webkitdirectory input: Playwright
     // cannot drive a native picker, but a directory path exercises the same

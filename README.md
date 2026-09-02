@@ -41,6 +41,7 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 | [`docs/06-browser-platform.md`](docs/06-browser-platform.md) | Current state of WebCodecs, demuxing, File System Access, WASM compute. The feasibility evidence. |
 | [`docs/07-risks.md`](docs/07-risks.md) | What could sink this, and what to do about each. |
 | [`docs/08-build-plan.md`](docs/08-build-plan.md) | The executable plan: work broken down to files, the UI specified, the project data model, the test-corpus plan, and the decisions still open. |
+| [`docs/09-hosting.md`](docs/09-hosting.md) | Deploying the static site, and what to tell — and ask back from — a tester. |
 
 ## Quick start
 
