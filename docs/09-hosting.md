@@ -16,11 +16,21 @@ every cross-origin subresource on the page.
 
 ## 1. GitHub Pages — recommended
 
-Already wired up. `.github/workflows/pages.yml` builds on every branch and
-deploys from the repository's default branch, and its first run switches Pages
-on for the repository itself, so there is no settings step.
+`.github/workflows/pages.yml` builds on every branch and deploys from the
+repository's default branch.
 
-The site lands at:
+**One manual step is unavoidable.** A repository owner has to turn Pages on:
+
+> **Settings → Pages → Build and deployment → Source: *GitHub Actions***
+
+The workflow cannot do it for you. `actions/configure-pages` has an
+`enablement: true` input that is supposed to, and it returns *"Resource not
+accessible by integration"* no matter what the `permissions:` block grants —
+creating a Pages site needs admin rights that a workflow's `GITHUB_TOKEN` is
+never given. This was tried; it fails the build, so the action is not used.
+
+After enabling Pages, re-run the workflow (**Actions → Deploy web app → Run
+workflow**) or push anything. The site lands at:
 
 ```
 https://<owner>.github.io/<repo>/
@@ -35,10 +45,6 @@ worker URL has to resolve relative to the page. `vite.config.ts` sets
 npm run build
 npm run smoke -- ./sample-shoot --base=/polysync
 ```
-
-If the workflow's `enablement: true` fails (it needs admin on the repository),
-turn Pages on by hand instead: **Settings → Pages → Build and deployment →
-Source: GitHub Actions**, then re-run the workflow.
 
 **Deploys only happen from the default branch.** GitHub refuses Pages
 deployments from anything else, which is why the deploy job carries

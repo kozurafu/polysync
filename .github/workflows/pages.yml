@@ -1,10 +1,22 @@
 # Publish the web app to GitHub Pages.
 #
-# The first run switches Pages on for the repository itself (see `enablement`
-# below), so there is no manual settings step. The published site lands at
-# https://<owner>.github.io/<repo>/ — a project site, served from a subpath,
-# which is why vite.config.ts sets `base: './'` and why `npm run smoke --
-# <folder> --base=/polysync` exists to test exactly that case.
+# ONE-TIME SETUP, and it cannot be automated: a repository owner has to turn
+# Pages on by hand at
+#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+# The workflow's GITHUB_TOKEN cannot do it — `actions/configure-pages` with
+# `enablement: true` returns "Resource not accessible by integration" no matter
+# what `permissions:` grants, because creating a Pages site needs admin rights
+# a workflow token is never given. Tried, and it fails the build, so it is not
+# used here. Until Pages is on, the build and artifact upload still succeed and
+# only the deploy step fails.
+#
+# `actions/configure-pages` is deliberately absent for a second reason: its job
+# is to hand a base URL to frameworks that need one at build time, and this app
+# does not — vite.config.ts sets `base: './'` so every asset and worker URL
+# resolves relative to the page. That is what makes the site work from a project
+# subpath (https://<owner>.github.io/<repo>/) as well as from a domain root, and
+# it is tested rather than assumed:
+#   npm run smoke -- ./sample-shoot --base=/polysync
 #
 # The app is entirely static — no server, no API, no upload — so any static
 # host works. Netlify and Cloudflare Pages need only: build `npm run build`,
@@ -41,13 +53,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      # enablement: true switches Pages on for the repository via the API on
-      # the first run, so there is no manual settings step. Needs `pages: write`
-      # above, and admin on the repo. If it fails, turn Pages on by hand:
-      # Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: apps/web/dist
