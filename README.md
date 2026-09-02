@@ -23,7 +23,7 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 |---|---|
 | `packages/sync-core` | **Working.** GCC-PHAT alignment, envelope fallback, drift estimation, whole-project graph solve. 22 tests, zero dependencies. |
 | `packages/exporters` | **Working** for FCP7 XML (Premiere / Resolve) and CMX3600 EDL. FCPXML pending. |
-| `packages/timecode` | Stub. `tmcd` and BWF `bext`/iXML parsers to come. |
+| `packages/timecode` | **Working** for SMPTE arithmetic, including drop-frame. `tmcd` and BWF `bext`/iXML parsers to come. |
 | `packages/media-io` | Stub. Demux/decode adapters over mediabunny + WebCodecs. |
 | `apps/web` | Stub. |
 
@@ -39,6 +39,7 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 | [`docs/05-roadmap.md`](docs/05-roadmap.md) | Phased build plan with milestones and acceptance criteria. |
 | [`docs/06-browser-platform.md`](docs/06-browser-platform.md) | Current state of WebCodecs, demuxing, File System Access, WASM compute. The feasibility evidence. |
 | [`docs/07-risks.md`](docs/07-risks.md) | What could sink this, and what to do about each. |
+| [`docs/08-build-plan.md`](docs/08-build-plan.md) | The executable plan: work broken down to files, the UI specified, the project data model, the test-corpus plan, and the decisions still open. |
 
 ## Quick start
 

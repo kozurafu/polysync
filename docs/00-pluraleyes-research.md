@@ -389,6 +389,15 @@ Covered under Premiere above — no separate distinct "Adobe audio-sync engine" 
 ### 8.5 Newer entrant: CamHeard
 Found during competitor research, not in the original brief but relevant context: a simplified one-button ("drop files → Sync → Export") standalone tool explicitly created in response to PluralEyes' gap, priced **$129 one-time or $14.99/month**, works fully offline and processes a full shooting day in one pass. **[Its actual sync accuracy/reliability versus PluralEyes was not independently verified in this research — treat as a vendor-reviewed claim, not confirmed.]**
 
+### 8.6 Newer entrant: WaveXML — *added September 2026*
+Launched as a public beta around **16 August 2026**, after the original research pass. **Free, full-featured, Mac and Windows.** NLE-anchored rather than card-anchored: export FCP7 XML or FCPXML from Resolve, Premiere or Final Cut, match the recorder tracks to the cameras in WaveXML, export XML back, keep cutting. Explicitly targets Zoom and Sound Devices recorders.
+
+**Why it matters to this project:** it is the first *free* cross-platform PluralEyes-shaped tool, which removes most of the pricing headroom the $129–$249 incumbents left. **[No pricing after beta has been announced; single-author project; sync accuracy not independently verified — treat as an announcement, not a benchmark.]**
+
+**Where it does not overlap:** starting from an exported sequence is the round-trip workflow, not the drop-a-card-folder-in workflow, and nothing in the available material describes transitive whole-project solving, exposed confidence, or drift measurement.
+
+**Sources:** [Newsshooter, 16 Aug 2026](https://www.newsshooter.com/2026/08/16/wavexml-auto-sync-for-cameras-audio/), [wavexml.com](https://wavexml.com/).
+
 ---
 
 ## 9. What Could Not Be Verified
