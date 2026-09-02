@@ -1,0 +1,13 @@
+# Netlify, as an alternative to GitHub Pages. Drag `apps/web/dist` onto
+# netlify.com/drop for a one-off, or connect the repo and use this.
+#
+# No COOP/COEP headers are set, and that is deliberate: the app avoids
+# SharedArrayBuffer precisely so it can be served from anywhere static without
+# cross-origin isolation, which would otherwise poison every subresource.
+
+[build]
+  command = "npm ci && npm run build"
+  publish = "apps/web/dist"
+
+[build.environment]
+  NODE_VERSION = "22"

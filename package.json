@@ -12,10 +12,14 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit -p packages/sync-core && tsc --noEmit -p packages/exporters && tsc --noEmit -p packages/timecode && tsc --noEmit -p packages/media-io",
+    "typecheck": "tsc --noEmit -p packages/sync-core && tsc --noEmit -p packages/exporters && tsc --noEmit -p packages/timecode && tsc --noEmit -p packages/media-io && tsc --noEmit -p apps/web",
     "sync": "tsx tools/cli.ts",
     "sample": "tsx tools/make-sample-shoot.ts",
-    "bench": "tsx tools/bench.ts"
+    "bench": "tsx tools/bench.ts",
+    "dev": "npm run dev --workspace @polysync/web",
+    "build": "npm run build --workspace @polysync/web",
+    "preview": "npm run preview --workspace @polysync/web",
+    "smoke": "tsx tools/smoke.ts"
   },
   "devDependencies": {
     "tsx": "^4.23.13",

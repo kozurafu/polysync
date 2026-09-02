@@ -8,3 +8,6 @@ coverage/
 .env.local
 /media-fixtures/
 /sample-shoot/
+
+/apps/web/dist/
+apps/web/smoke.png

@@ -25,8 +25,8 @@ Polysync targets all four, and adds the thing PluralEyes 4 famously removed: **u
 | `packages/exporters` | **Working** for FCP7 XML (Premiere / Resolve) and CMX3600 EDL. FCPXML pending. |
 | `packages/timecode` | **Working.** SMPTE arithmetic including drop-frame, QuickTime `tmcd` timecode tracks, and BWF `bext` + iXML (start timecode, frame rate, per-channel names). Zero dependencies. |
 | `packages/media-io` | **Working for PCM.** WAV/BWF/RF64 read directly, containers via `mediabunny`, streaming decimation, device grouping, file identity and relinking. Compressed audio needs WebCodecs, so it decodes in a browser but not in Node. OPFS cache and worker pool still to come. |
-| `apps/web` | Stub. |
-| `tools/` | **Working.** CLI harness: point it at a folder, get a synced timeline report. |
+| `apps/web` | **Working.** React + Vite. Folder drop, parallel decode across a worker pool, solve off the main thread, results with quality and drift, FCP7 XML and EDL export. No waveform timeline editing yet. |
+| `tools/` | **Working.** CLI harness, sample-shoot generator, solve benchmark, and a browser smoke test. |
 
 ## Documentation
 
@@ -51,10 +51,27 @@ npm run typecheck
 npm run bench                  # solve time on a simulated shoot day
 ```
 
+### Run the app
+
+```bash
+npm run dev          # http://localhost:5173
+npm run build        # static site in apps/web/dist
+```
+
+The built site is **entirely static** — no server, no API, nothing is uploaded —
+so it can be hosted anywhere: GitHub Pages (a workflow is included), Netlify
+(`netlify.toml` is included), Cloudflare Pages, or an S3 bucket. It deliberately
+avoids `SharedArrayBuffer`, so it needs no COOP/COEP headers and no special host
+configuration.
+
+Use Chrome or Edge for the best experience: they can remember the folder you
+picked. Safari 26 and Firefox work too, but you re-pick the folder each session.
+Compressed camera audio (AAC) needs WebCodecs; WAV and BWF from any recorder
+work everywhere.
+
 ### Sync a folder from the command line
 
-There is no UI yet, but the engine is usable today. Generate a synthetic shoot
-and solve it:
+The engine is also usable without the UI. Generate a synthetic shoot and solve it:
 
 ```bash
 npm run sample -- ./sample-shoot   # a recorder, three cameras, one stray file
