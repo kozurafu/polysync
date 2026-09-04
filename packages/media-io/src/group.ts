@@ -86,31 +86,57 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
     { basis: 'extension-class', key: extensionClass },
   ];
 
+  // The first strategy that manages to name every file, kept aside in case no
+  // strategy manages to split them. A folder of one camera's rushes really is
+  // one device, and calling it `C2` because that is what the files are called
+  // beats falling through to the extension-class last resort and calling it
+  // VIDEO.
+  let fallback: { basis: GroupBasis; keys: string[] } | undefined;
+
   for (const { basis, key } of strategies) {
     const keys = inputs.map(key);
-    // A strategy that names every file, and names more than one device, has
-    // actually identified something. Anything less is a guess we can improve on.
     if (keys.some((k) => k === undefined)) continue;
-    const distinct = new Set(keys as string[]);
-    if (distinct.size < 2 && basis !== 'extension-class') continue;
+    const named = keys as string[];
+    if (!fallback) fallback = { basis, keys: named };
 
-    const assignments = inputs.map((input, i) => ({
-      clipId: input.id,
-      deviceId: keys[i] as string,
-      basis,
-    }));
-    return { assignments, deviceIds: orderDevices(assignments, inputs), basis, warnings };
+    // A strategy that names every file *and* names more than one device has
+    // actually identified something. One device is not yet a reason to stop —
+    // a later strategy may still separate them.
+    if (new Set(named).size < 2) continue;
+    return finish(inputs, named, basis, warnings);
   }
 
-  // Nothing separated them. One device is the honest answer, not a failure:
-  // a single camera's worth of rushes really is one device.
+  if (fallback) return finish(inputs, fallback.keys, fallback.basis, warnings);
+
   const only = inputs.length === 1 ? deviceNameFor(inputs[0]) : 'DEVICE_1';
-  const assignments = inputs.map((input) => ({
+  return finish(inputs, inputs.map(() => only), 'extension-class', warnings);
+}
+
+function finish(
+  inputs: GroupInput[],
+  keys: string[],
+  basis: GroupBasis,
+  warnings: string[],
+): GroupResult {
+  const assignments = inputs.map((input, i) => ({
     clipId: input.id,
-    deviceId: only,
-    basis: 'directory' as const,
+    deviceId: keys[i],
+    basis,
   }));
-  return { assignments, deviceIds: [only], basis: 'directory', warnings };
+  const deviceIds = orderDevices(assignments, inputs);
+
+  // The single most useful thing to say when it is true. Sync compares one
+  // device against another; with only one there is nothing to compare against,
+  // and every clip will come back unsynced no matter how good the audio is.
+  if (deviceIds.length < 2 && inputs.length > 1) {
+    warnings.push(
+      `All ${inputs.length} clips look like they came from one device (${deviceIds[0]}). ` +
+        `Syncing needs at least two — a camera and a recorder, or two cameras. ` +
+        `If more than one device really is in here, set the right device per clip below.`,
+    );
+  }
+
+  return { assignments, deviceIds, basis, warnings };
 }
 
 /** The folder containing a recognised card structure. */
@@ -158,16 +184,36 @@ function topDirectory(input: GroupInput): string | undefined {
 /**
  * Reel or prefix from the filename.
  *
- * Canon writes `A001C002_...`, where the reel is `A001` and the clip is `C002`;
- * grouping on the leading letter alone would merge every card. Sony writes
- * `C0001.MP4`, Zoom `ZOOM0001.WAV`, GoPro `GX010123.MP4`.
+ * Cameras name files in a handful of recognisable shapes, and the right answer
+ * differs for each:
+ *
+ *   `A001C002_240101AB.MOV`  Canon — the reel is `A001`, the clip is `C002`.
+ *                            Taking the leading letter alone merges every card.
+ *   `C2_4928.MP4`            body/camera id, then a counter after a separator.
+ *   `MVI_1234.MOV`           the same shape with a letters-only prefix.
+ *   `ZOOM0001.WAV`           prefix runs straight into the counter.
+ *   `GX010123.MP4`           GoPro, likewise.
+ *   `C0001.MP4`              Sony — a single letter, then the counter.
+ *   `00001.MTS`             nothing to go on; give up rather than guess.
  */
 function filenamePrefix(input: GroupInput): string | undefined {
   const base = baseName(input.path).replace(/\.[^.]+$/, '');
+
   const canon = /^([A-Za-z]\d{3})[A-Za-z]\d{3,4}/.exec(base);
   if (canon) return sanitise(canon[1]);
+
+  // Everything before the first separator, when it carries a letter. This is
+  // what makes `C2_4928` group as `C2` rather than falling through to the
+  // extension-class last resort and being labelled, unhelpfully, VIDEO.
+  const separated = /^([^_\-.]*[A-Za-z][^_\-.]*)[_\-.]/.exec(base);
+  if (separated) return sanitise(separated[1]);
+
   const alpha = /^([A-Za-z]{2,})/.exec(base);
   if (alpha) return sanitise(alpha[1]);
+
+  const single = /^([A-Za-z])\d+$/.exec(base);
+  if (single) return sanitise(single[1]);
+
   return undefined;
 }
 

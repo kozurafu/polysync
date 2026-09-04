@@ -52,6 +52,8 @@ export interface Placement {
 export interface SyncStats {
   /** n(n-1)/2 — every pair that existed. */
   totalPairs: number;
+  /** Ruled out because both clips came from the same device. */
+  skippedBySameDevice: number;
   /** Ruled out because the two recording windows cannot intersect. */
   skippedByRecordingTime: number;
   /** Ruled out because no offset could reach the acceptance threshold. */

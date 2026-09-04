@@ -134,7 +134,26 @@ async function main(): Promise<void> {
     const devices = await page.locator('.device-chip b').allTextContents();
     console.log(`Devices: ${devices.join(', ')}`);
 
-    await page.click('button:has-text("Synchronize")');
+    // A folder from a single device cannot be synced — there is nothing to
+    // compare against — and the app now says so instead of running a solve that
+    // can only fail. Report that as the outcome rather than as a failure.
+    const syncButton = page.locator('button:has-text("Synchronize")');
+    if (await syncButton.isDisabled()) {
+      const reason = (await page.locator('.note.warn p').first().textContent()) ?? '';
+      console.log(`\nSync is blocked, and correctly so:\n  ${reason.trim()}`);
+      await page.screenshot({ path: 'apps/web/smoke.png', fullPage: true });
+      console.log('  Screenshot: apps/web/smoke.png');
+      if (consoleErrors.length) {
+        console.error(`\nFAIL: ${consoleErrors.length} console error(s)`);
+        for (const line of consoleErrors.slice(0, 10)) console.error(`  ${line}`);
+        failed = true;
+      } else {
+        console.log('\nPASS (nothing to sync)');
+      }
+      return;
+    }
+
+    await syncButton.click();
     console.log('Synchronizing…');
 
     await page.waitForSelector('.pill', { timeout: 300_000 });

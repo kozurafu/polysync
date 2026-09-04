@@ -39,6 +39,17 @@ export function escapeXml(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * A filename reduced to something an XML `ID` attribute can legally hold:
+ * letters, digits, hyphen, underscore and full stop, and never leading with a
+ * digit. Two different clips must not collide, so anything else becomes `_`
+ * rather than being dropped.
+ */
+export function idSlug(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[^A-Za-z_]+/, '_');
+  return cleaned || '_';
+}
+
 /** Absolute path to a `file://` URL, percent-encoded per component. */
 export function pathToFileUrl(path: string): string {
   const normalised = path.replace(/\\/g, '/');
@@ -72,8 +83,13 @@ function clipItemXml(
   const start = secondsToFrames(clip.startSeconds, rate);
   const duration = secondsToFrames(clip.durationSeconds, rate);
   const inPoint = secondsToFrames(clip.sourceInSeconds ?? 0, rate);
-  const fileId = `file-${clip.id}`;
-  const itemId = `clipitem-${clip.id}-${mediaType}${channel ? `-${channel}` : ''}`;
+  // XML ID-typed attributes cannot contain spaces, and filenames very much can
+  // — a real export carried `clipitem- C2_4928.MP4-video`, from a file whose
+  // name began with a space. Slugged rather than escaped, because escaping
+  // produces a valid document with an invalid identifier in it.
+  const slug = idSlug(clip.id);
+  const fileId = `file-${slug}`;
+  const itemId = `clipitem-${slug}-${mediaType}${channel ? `-${channel}` : ''}`;
 
   const lines: string[] = [];
   lines.push(`        <clipitem id="${escapeXml(itemId)}">`);
@@ -185,16 +201,29 @@ export function exportFcp7Xml(
   // Every audio source gets its own track. PluralEyes used only the topmost
   // overlapping audio-only track on Premiere export, which silently dropped
   // additional recorders on multi-recorder shoots.
+  //
+  // And every *channel* gets its own track too. FCP7 XML has no notion of a
+  // stereo clip on one timeline track: a two-channel source is two clipitems,
+  // one per track, distinguished by `<trackindex>`. Emitting only trackindex 1
+  // brings in half the audio at best and, on a track where clips overlap,
+  // nothing at all.
   lines.push(`      <audio>`);
   for (const trackId of audioTracks) {
-    lines.push(`        <track>`);
-    lines.push(`          <!-- ${escapeXml(trackId)} -->`);
-    for (const clip of project.clips.filter((c) => c.trackId === trackId && c.hasAudio)) {
-      lines.push(clipItemXml(clip, project, 'audio', seenFiles, opts, 1));
+    const clipsOnTrack = project.clips.filter((c) => c.trackId === trackId && c.hasAudio);
+    const channels = Math.max(1, ...clipsOnTrack.map((c) => c.audioChannels ?? 2));
+    for (let channel = 1; channel <= channels; channel++) {
+      lines.push(`        <track>`);
+      lines.push(`          <!-- ${escapeXml(trackId)} ch${channel} -->`);
+      for (const clip of clipsOnTrack) {
+        // A mono source has nothing on channel 2; asking for it makes Premiere
+        // drop the whole clipitem.
+        if (channel > (clip.audioChannels ?? 2)) continue;
+        lines.push(clipItemXml(clip, project, 'audio', seenFiles, opts, channel));
+      }
+      lines.push(`          <enabled>TRUE</enabled>`);
+      lines.push(`          <locked>FALSE</locked>`);
+      lines.push(`        </track>`);
     }
-    lines.push(`          <enabled>TRUE</enabled>`);
-    lines.push(`          <locked>FALSE</locked>`);
-    lines.push(`        </track>`);
   }
   lines.push(`      </audio>`);
 

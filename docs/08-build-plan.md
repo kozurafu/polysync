@@ -297,6 +297,38 @@ Leave the fingerprint index in Phase 4. Do the worker pool as part of the app.
 
 ---
 
+## 7.3 What the first real shoot found
+
+A user dropped 70 clips from a single camera — one event, one room, 39 of them
+under ten seconds — and the tool matched them to each other and stacked 66 of
+the 70 between 80 s and 140 s. 1,618 overlapping pairs out of 2,415, on a track
+that can hold one clip at a time. The exported XML was unusable.
+
+Four separate defects, none of which any synthetic fixture would have caught,
+because every fixture assumed a shoot with more than one device in it:
+
+1. **Nothing knew that a device records one clip at a time.** Two clips from
+   the same camera cannot overlap in time and cannot share a sound, however
+   well they correlate — and clips of one room at one event correlate very
+   well. Now a gate, and the single most valuable line of code in this
+   release.
+2. **`preserveClipOrder` was declared and never implemented.** The flagship
+   restored-from-v3 control, on by default, doing nothing for three commits.
+   It now orders unsynced clips as supplied and reports same-device overlaps
+   instead of hiding them.
+3. **Grouping had no rule for `C2_4928.MP4`**, so 70 files fell through every
+   strategy to the extension-class last resort and were labelled `VIDEO`. A
+   single-device project also never reported itself as one.
+4. **The app never said "there is nothing to sync here."** Sync compares one
+   device against another; with one device every clip comes back unsynced no
+   matter what. The user sat through the solve to find that out.
+
+The lesson for the test corpus: the fixtures modelled the degradations we
+thought of — level, bandwidth, noise, drift. They did not model *the wrong
+shape of project*, which is what a real user actually hands you.
+
+---
+
 ## 8. Decisions that are actually open
 
 These block nothing technically, and all of them change what gets built:

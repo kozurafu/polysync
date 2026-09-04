@@ -127,6 +127,46 @@ describe('groupClips', () => {
   it('handles an empty drop', () => {
     expect(groupClips([]).assignments).toEqual([]);
   });
+
+  it('names a single camera from its files rather than calling it VIDEO', () => {
+    // Reported 2026-09-04: 70 files named C2_49xx.MP4 in one flat folder came
+    // back as one device called VIDEO, via the extension-class last resort,
+    // because no prefix rule matched "C2_4928". The device name is the only
+    // clue the user gets about what the tool thinks it is looking at.
+    const result = groupClips(
+      inputs('C2_4928.MP4', 'C2_4929.MP4', 'C2_4930.MP4', 'C2_4931.MP4'),
+    );
+    expect(result.basis).toBe('filename-prefix');
+    expect(result.deviceIds).toEqual(['C2']);
+  });
+
+  it('warns, loudly, when everything came from one device', () => {
+    // The single most useful thing to say when it is true: sync compares one
+    // device against another, so with one device every clip comes back
+    // unsynced however good the audio is. Saying nothing left a user watching
+    // a 70-clip project fail with no explanation.
+    const result = groupClips(inputs('C2_4928.MP4', 'C2_4929.MP4', 'C2_4930.MP4'));
+    expect(result.deviceIds).toHaveLength(1);
+    expect(result.warnings.join(' ')).toMatch(/one device/i);
+    expect(result.warnings.join(' ')).toMatch(/at least two/i);
+  });
+
+  it('does not warn when there are two devices to compare', () => {
+    const result = groupClips(inputs('CamA/clip.mov', 'REC/take.wav'));
+    expect(result.warnings.join(' ')).not.toMatch(/one device/i);
+  });
+
+  it('separates two camera bodies by their filename prefix', () => {
+    const result = groupClips(inputs('C2_4928.MP4', 'C2_4929.MP4', 'C1_0007.MP4'));
+    expect(deviceOf(result, 'c0')).toBe('C2');
+    expect(deviceOf(result, 'c2')).toBe('C1');
+  });
+
+  it('reads a Sony single-letter prefix', () => {
+    const result = groupClips(inputs('C0001.MP4', 'C0002.MP4', 'ZOOM0001.WAV'));
+    expect(deviceOf(result, 'c0')).toBe('C');
+    expect(deviceOf(result, 'c2')).toBe('ZOOM');
+  });
 });
 
 describe('relink', () => {

@@ -147,6 +147,18 @@ export function App() {
 
   const busy = phase === 'ingesting' || phase === 'syncing';
 
+  // Sync compares one device against another. With one device there is nothing
+  // to compare against and every clip comes back unsynced however good the
+  // audio is — so say that instead of letting someone sit through the solve to
+  // find out. A user did exactly that with 70 clips from one camera.
+  const canSync = clips.length >= 2 && devices.length >= 2;
+  const syncBlockedReason =
+    clips.length < 2
+      ? 'Add at least two clips'
+      : devices.length < 2
+        ? `Everything is on one device (${devices[0]}). Syncing needs two — set the right device per clip below.`
+        : undefined;
+
   return (
     <div className="app">
       <header className="topbar">
@@ -160,7 +172,12 @@ export function App() {
             </button>
           )}
           {clips.length > 0 && (
-            <button className="primary" onClick={runSync} disabled={busy || clips.length < 2}>
+            <button
+              className="primary"
+              onClick={runSync}
+              disabled={busy || !canSync}
+              title={syncBlockedReason}
+            >
               {phase === 'solved' ? 'Synchronize again' : 'Synchronize'}
             </button>
           )}
@@ -242,6 +259,13 @@ export function App() {
           <div className="note bad">
             <h3>Problem</h3>
             {error}
+          </div>
+        )}
+
+        {!busy && clips.length > 0 && !canSync && (
+          <div className="note warn">
+            <h3>Nothing to sync yet</h3>
+            <p style={{ margin: 0 }}>{syncBlockedReason}</p>
           </div>
         )}
 

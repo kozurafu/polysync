@@ -2,6 +2,7 @@ import { DEFAULT_ALIGN_OPTIONS, alignPair, prepareClip, type AlignOptions, type 
 import { DEFAULT_DRIFT_OPTIONS, estimateDrift, type DriftOptions } from './drift.js';
 import {
   DEFAULT_GATE_OPTIONS,
+  isSameDevice,
   maxEnvelopeCorrelation,
   recordingTimeMatrix,
   type GateOptions,
@@ -78,6 +79,7 @@ export function syncProject(
 
   const stats: SyncStats = {
     totalPairs: (n * (n - 1)) / 2,
+    skippedBySameDevice: 0,
     skippedByRecordingTime: 0,
     skippedByEnvelope: 0,
     aligned: 0,
@@ -117,17 +119,24 @@ export function syncProject(
       // audio at all, and establishing that with a full alignment is the
       // dominant cost of the whole solve. Neither gate may reject a pair that
       // would have matched — see gates.ts for why each one cannot.
-      let skipped: 'recording-time' | 'envelope' | null = null;
+      let skipped: 'same-device' | 'recording-time' | 'envelope' | null = null;
       let bound = 0;
 
-      if (timeAllowed && !timeAllowed[i][j]) {
+      if (!opts.allowSameDeviceMatches && isSameDevice(prepared[i], prepared[j])) {
+        // A camera records one clip at a time, so these cannot share a sound
+        // however well they correlate. See gates.ts.
+        skipped = 'same-device';
+      } else if (timeAllowed && !timeAllowed[i][j]) {
         skipped = 'recording-time';
       } else if (opts.envelopePrefilter) {
         bound = maxEnvelopeCorrelation(prepared[i], prepared[j], opts.minOverlapSeconds).r;
         if (bound < opts.minQuality - opts.prefilterMargin) skipped = 'envelope';
       }
 
-      if (skipped === 'recording-time') {
+      if (skipped === 'same-device') {
+        stats.skippedBySameDevice++;
+        pairs.push(rejectedPair(prepared[i], prepared[j], 0));
+      } else if (skipped === 'recording-time') {
         stats.skippedByRecordingTime++;
         pairs.push(rejectedPair(prepared[i], prepared[j], 0));
       } else if (skipped === 'envelope') {
@@ -227,19 +236,87 @@ export function syncProject(
   // Lay the components out: the largest synced group starts at zero, every
   // other group is parked after it in order, which is how an editor wants to
   // find the material that did not sync.
-  const order = components
-    .map((members, id) => ({ id, members, size: members.length }))
-    .sort((x, y) => y.size - x.size || x.id - y.id);
+  //
+  // Unsynced clips — components of one — are handled separately below. Treating
+  // each as its own group would put a gap between every one of them, and a
+  // project where nothing synced would come back as a staircase of 70 clips
+  // spread over an hour of empty timeline.
+  const duration = (i: number) => clips[i].samples.length / clips[i].sampleRate;
+  const synced = components
+    .map((members, id) => ({ id, members }))
+    .filter((c) => c.members.length > 1)
+    .sort((x, y) => y.members.length - x.members.length || x.id - y.id);
 
   let cursor = 0;
   const groupBase = new Map<number, number>();
-  for (const comp of order) {
+  for (const comp of synced) {
     const minPos = Math.min(...comp.members.map((m) => position[m]!));
     groupBase.set(comp.id, cursor - minPos);
-    const maxEnd = Math.max(
-      ...comp.members.map((m) => position[m]! + clips[m].samples.length / clips[m].sampleRate),
-    );
+    const maxEnd = Math.max(...comp.members.map((m) => position[m]! + duration(m)));
     cursor = cursor - minPos + maxEnd + opts.groupGapSeconds;
+  }
+
+  // Unsynced clips, laid end to end after the synced material, grouped by the
+  // device they came from. `preserveClipOrder` keeps them in the order they
+  // were supplied — the order the camera shot them — rather than in whatever
+  // order the solver happened to visit them. PluralEyes 4 removed this control
+  // and its absence was that release's most-complained-about regression; it was
+  // declared here for three commits before it did anything.
+  const loose = components
+    .map((members, id) => ({ id, member: members[0], size: members.length }))
+    .filter((c) => c.size === 1);
+
+  if (loose.length) {
+    const byDevice = new Map<string, number[]>();
+    for (const { member } of loose) {
+      const device = clips[member].trackId ?? clips[member].id;
+      const list = byDevice.get(device) ?? [];
+      list.push(member);
+      byDevice.set(device, list);
+    }
+    for (const [, members] of byDevice) {
+      // Supplied order is clip index order; the solver's visit order is not
+      // guaranteed to match it once components are formed.
+      if (opts.preserveClipOrder) members.sort((a, b) => a - b);
+      for (const member of members) {
+        groupBase.set(group[member], cursor - position[member]!);
+        cursor += duration(member);
+      }
+      cursor += opts.groupGapSeconds;
+    }
+  }
+
+  // A clip may still land on top of a sibling from the same device by being
+  // pulled there transitively through other devices. That cannot be true — one
+  // device records one clip at a time — so say so rather than shifting it
+  // silently and hiding a real disagreement.
+  if (opts.preserveClipOrder) {
+    const byDevice = new Map<string, number[]>();
+    for (let i = 0; i < n; i++) {
+      const device = clips[i].trackId;
+      if (device == null) continue;
+      const list = byDevice.get(device) ?? [];
+      list.push(i);
+      byDevice.set(device, list);
+    }
+    const absolute = (i: number) => position[i]! + (groupBase.get(group[i]) ?? 0);
+    for (const [, members] of byDevice) {
+      const placed = members
+        .filter((m) => components[group[m]].length > 1)
+        .sort((a, b) => absolute(a) - absolute(b));
+      for (let k = 1; k < placed.length; k++) {
+        const prev = placed[k - 1];
+        const cur = placed[k];
+        const overlap = absolute(prev) + duration(prev) - absolute(cur);
+        if (overlap > 0.02) {
+          inconsistencies.push({
+            aId: clips[prev].id,
+            bId: clips[cur].id,
+            errorSeconds: overlap,
+          });
+        }
+      }
+    }
   }
 
   const driftByClip = new Map<string, number>();

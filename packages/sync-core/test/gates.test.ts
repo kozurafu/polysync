@@ -266,11 +266,18 @@ describe('gates do not change the answer', () => {
   it('actually skips the cross-scene pairs', () => {
     const result = syncProject(shoot(), OPTS);
     expect(result.stats.totalPairs).toBe(15); // 6 clips
-    // Every pair spanning the four-hour gap: 3 x 3.
-    expect(result.stats.skippedByRecordingTime).toBe(9);
+
+    // Three pairs are one device shot across both scenes (REC, CAM_A, CAM_B),
+    // and the same-device rule claims those before recording time is consulted.
+    expect(result.stats.skippedBySameDevice).toBe(3);
+    // The other six cross-scene pairs are four hours apart.
+    expect(result.stats.skippedByRecordingTime).toBe(6);
     expect(result.stats.aligned).toBe(6);
     expect(
-      result.stats.aligned + result.stats.skippedByRecordingTime + result.stats.skippedByEnvelope,
+      result.stats.aligned +
+        result.stats.skippedBySameDevice +
+        result.stats.skippedByRecordingTime +
+        result.stats.skippedByEnvelope,
     ).toBe(result.stats.totalPairs);
   }, 180_000);
 

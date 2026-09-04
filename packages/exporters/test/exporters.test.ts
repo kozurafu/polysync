@@ -93,18 +93,29 @@ describe('FCP7 XML export', () => {
     // others are inside <file><media>.
     const start = xml.indexOf('\n      <audio>');
     const audioBlock = xml.slice(start, xml.indexOf('\n      </audio>'));
-    expect(audioBlock).toContain('<!-- REC -->');
-    expect(audioBlock).toContain('<!-- CAM_A -->');
-    expect(audioBlock).toContain('<!-- CAM_B -->');
-    // Three sources, three audio tracks.
-    expect((audioBlock.match(/<track>/g) ?? []).length).toBe(3);
+    expect(audioBlock).toContain('<!-- REC ch1 -->');
+    expect(audioBlock).toContain('<!-- CAM_A ch1 -->');
+    expect(audioBlock).toContain('<!-- CAM_B ch1 -->');
+  });
+
+  it('gives every source channel its own track', () => {
+    // FCP7 XML has no stereo-clip-on-one-track concept: a two-channel source
+    // is two clipitems on two tracks, told apart by <trackindex>. Emitting
+    // only trackindex 1 brings in half the audio at best.
+    const start = xml.indexOf('\n      <audio>');
+    const audioBlock = xml.slice(start, xml.indexOf('\n      </audio>'));
+    expect(audioBlock).toContain('<!-- CAM_A ch2 -->');
+    expect(audioBlock).toContain('<trackindex>2</trackindex>');
+    // Three stereo sources, two channels each.
+    expect((audioBlock.match(/<track>/g) ?? []).length).toBe(6);
   });
 
   it('colours unsynced clips and leaves synced ones alone', () => {
     expect(xml).toContain('<label2>Rose</label2>');
-    // The one unsynced clip has picture and sound, so it contributes a video
-    // and an audio clipitem — two labels, and none from the synced clips.
-    expect((xml.match(/<label2>/g) ?? []).length).toBe(2);
+    // The one unsynced clip has picture and two channels of sound, so it
+    // contributes one video and two audio clipitems — three labels, and none
+    // from the synced clips.
+    expect((xml.match(/<label2>/g) ?? []).length).toBe(3);
   });
 
   it('escapes XML metacharacters in names', () => {
@@ -113,8 +124,20 @@ describe('FCP7 XML export', () => {
   });
 
   it('defines each source file once and references it thereafter', () => {
+    // One full definition on the video clipitem; one bare reference per audio
+    // channel. Repeating the definition bloats the file and confuses Premiere.
     expect((xml.match(/<file id="file-camA1">/g) ?? []).length).toBe(1);
-    expect((xml.match(/<file id="file-camA1"\/>/g) ?? []).length).toBe(1);
+    expect((xml.match(/<file id="file-camA1"\/>/g) ?? []).length).toBe(2);
+  });
+
+  it('produces XML ids a parser will accept, whatever the file is called', () => {
+    // A real export carried `clipitem- C2_4928.MP4-video`, from a file whose
+    // name began with a space. XML ID attributes cannot contain spaces.
+    const ids = [...xml.matchAll(/ id="([^"]*)"/g)].map((m) => m[1]);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(id, `bad XML id: ${JSON.stringify(id)}`).toMatch(/^[A-Za-z_][A-Za-z0-9._-]*$/);
+    }
   });
 
   it('can turn off unsynced colouring', () => {

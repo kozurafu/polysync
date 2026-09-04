@@ -25,6 +25,25 @@ import { fft, ifft, nextPow2 } from './fft.js';
 import type { PreparedClip } from './align.js';
 
 export interface GateOptions {
+  /**
+   * Allow two clips from the *same* device to be matched to each other.
+   *
+   * Off, and it should stay off. A camera records one clip at a time, so two
+   * clips from one device cannot overlap in time and cannot share a sound —
+   * whatever their audio says. Matching them is not a near-miss, it is a
+   * category error, and the result is clips stacked on top of each other on a
+   * track that can only hold one at a time.
+   *
+   * This is not hypothetical. A user dropped 70 sequential takes from one
+   * camera at one event — same room, same ambience, 39 of them under ten
+   * seconds — and the engine matched them to each other and piled 66 of the 70
+   * between 80 s and 140 s: 1,618 overlapping pairs out of 2,415. The audio
+   * really did correlate. The placement was still nonsense.
+   *
+   * Turn it on only if device grouping has merged two real devices into one and
+   * you would rather fix it here than by regrouping.
+   */
+  allowSameDeviceMatches: boolean;
   /** Rule out pairs whose recording windows cannot intersect. */
   gateByRecordingTime: boolean;
   /**
@@ -51,6 +70,7 @@ export interface GateOptions {
 }
 
 export const DEFAULT_GATE_OPTIONS: GateOptions = {
+  allowSameDeviceMatches: false,
   gateByRecordingTime: true,
   recordingTimeSlopSeconds: 3600,
   // Off by default, and measured rather than assumed. On a simulated shoot day
@@ -66,7 +86,7 @@ export const DEFAULT_GATE_OPTIONS: GateOptions = {
   prefilterMargin: 0.05,
 };
 
-export type GateReason = 'recording-time' | 'envelope';
+export type GateReason = 'same-device' | 'recording-time' | 'envelope';
 
 export interface ScreenResult {
   /** False means this pair cannot match and must not be aligned. */
@@ -102,6 +122,19 @@ export function couldOverlapInTime(
   const bFrom = tb - b.durationSeconds - slopSeconds;
   const bTo = tb + b.durationSeconds + slopSeconds;
   return aFrom <= bTo && bFrom <= aTo;
+}
+
+/**
+ * Two clips recorded by the same device.
+ *
+ * Clips with no `trackId` are treated as their own device rather than as one
+ * shared unknown, because the caller has told us nothing and refusing to match
+ * them would be inventing a constraint from an absence.
+ */
+export function isSameDevice(a: PreparedClip, b: PreparedClip): boolean {
+  const da = a.clip.trackId;
+  const db = b.clip.trackId;
+  return da != null && db != null && da === db;
 }
 
 /**
@@ -244,6 +277,9 @@ export function screenPair(
   b: PreparedClip,
   opts: GateOptions & { minQuality: number; minOverlapSeconds: number },
 ): ScreenResult {
+  if (!opts.allowSameDeviceMatches && isSameDevice(a, b)) {
+    return { pass: false, reason: 'same-device' };
+  }
   if (opts.gateByRecordingTime && !couldOverlapInTime(a, b, opts.recordingTimeSlopSeconds)) {
     return { pass: false, reason: 'recording-time' };
   }
