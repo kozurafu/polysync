@@ -12,6 +12,7 @@ import {
 } from './lib/engine.ts';
 import { downloadText, fromDrop, fromInput, hasDirectoryPicker, pickDirectory } from './lib/files.ts';
 import { FRAME_RATES, exportFiles, guessFrameRate } from './lib/exportProject.ts';
+import { buildDiagnosticReport, probeEnvironment } from './lib/diagnostics.ts';
 import { Timeline, formatClock } from './components/Timeline.tsx';
 
 type Phase = 'idle' | 'ingesting' | 'ready' | 'syncing' | 'solved';
@@ -29,6 +30,9 @@ export function App() {
   const [projectName, setProjectName] = useState('shoot_day_01');
   const [mediaRoot, setMediaRoot] = useState('');
   const [rate, setRate] = useState<FrameRate | null>(null);
+  const [timings, setTimings] = useState<{ ingestSeconds?: number; solveSeconds?: number }>({});
+  const [report, setReport] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const grouping: GroupResult | null = useMemo(() => {
@@ -69,6 +73,8 @@ export function App() {
     setPicked(files);
     setPhase('ingesting');
     setProgress({ fraction: 0, label: 'Reading files' });
+    setReport(null);
+    const started = performance.now();
 
     try {
       const { clips: ingested, failures: failed } = await ingestFiles(files, {
@@ -78,6 +84,7 @@ export function App() {
             label: p.current ? `Decoding ${p.current}` : `Decoded ${p.done} of ${p.total}`,
           }),
       });
+      setTimings({ ingestSeconds: (performance.now() - started) / 1000 });
       setClips(ingested);
       setFailures(failed);
       setOverrides({});
@@ -111,10 +118,12 @@ export function App() {
     setError(null);
     setPhase('syncing');
     setProgress({ fraction: 0, label: 'Preparing audio' });
+    const started = performance.now();
     try {
       const solved = await solve(working, deviceOf, {
         onProgress: (fraction, label) => setProgress({ fraction, label }),
       });
+      setTimings((t) => ({ ...t, solveSeconds: (performance.now() - started) / 1000 }));
       setResult(solved);
       setPhase('solved');
     } catch (e) {
@@ -145,6 +154,45 @@ export function App() {
     [result, rate, projectName, clips, deviceOf, mediaRoot],
   );
 
+  const makeReport = useCallback(async () => {
+    const environment = await probeEnvironment(poolSize(Math.max(1, picked.length)));
+    setReport(
+      buildDiagnosticReport({
+        generatedAt: new Date().toISOString(),
+        environment,
+        filesPicked: picked.length,
+        clips,
+        failures,
+        grouping,
+        deviceOf,
+        overrides,
+        result,
+        timings,
+        settings: {
+          projectName,
+          frameRate: FRAME_RATES.find((r) => rate && sameRate(r.rate, rate))?.label ?? '25',
+          mediaRoot,
+        },
+      }),
+    );
+    setCopied(false);
+  }, [
+    picked, clips, failures, grouping, deviceOf, overrides,
+    result, timings, projectName, rate, mediaRoot,
+  ]);
+
+  const copyReport = useCallback(async () => {
+    if (!report) return;
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopied(true);
+    } catch {
+      // Clipboard access needs a secure context and a user gesture, and can
+      // still be refused. Falling back to a file loses nothing.
+      downloadText('polysync-diagnostics.txt', report);
+    }
+  }, [report]);
+
   const busy = phase === 'ingesting' || phase === 'syncing';
 
   // Sync compares one device against another. With one device there is nothing
@@ -166,6 +214,11 @@ export function App() {
         <div className="privacy">LOCAL ONLY · NOTHING IS UPLOADED</div>
         <div className="spacer" />
         <div className="actions">
+          {clips.length > 0 && (
+            <button onClick={() => void makeReport()} disabled={busy}>
+              Diagnostics
+            </button>
+          )}
           {clips.length > 0 && (
             <button onClick={() => inputRef.current?.click()} disabled={busy}>
               Add media
@@ -518,6 +571,29 @@ export function App() {
                 General → “Display the project item name and label color for all instances”</em>{' '}
                 silently overrides that, so turn it off if the colours do not appear.
               </div>
+            </div>
+          </section>
+        )}
+        {report && (
+          <section className="panel">
+            <h2>Diagnostic report</h2>
+            <div className="panel-body">
+              <p className="help" style={{ marginTop: 0 }}>
+                Everything below is what gets sent — read it first. It lists file names, folder
+                paths and formats, the device grouping, the solve result, and why each unsynced
+                clip did not match. It contains <strong>no audio of any kind</strong>: no samples,
+                no waveforms, nothing derived from the sound.
+              </p>
+              <div className="export-row" style={{ marginBottom: 12 }}>
+                <button className="primary" onClick={() => void copyReport()}>
+                  {copied ? 'Copied' : 'Copy to clipboard'}
+                </button>
+                <button onClick={() => downloadText('polysync-diagnostics.txt', report)}>
+                  Download as a file
+                </button>
+                <button onClick={() => setReport(null)}>Close</button>
+              </div>
+              <pre className="report">{report}</pre>
             </div>
           </section>
         )}

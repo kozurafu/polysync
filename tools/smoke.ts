@@ -84,6 +84,22 @@ async function mediaFilesIn(root: string): Promise<string[]> {
   return out.sort();
 }
 
+/**
+ * Generate the diagnostic report through the real UI and print it.
+ *
+ * Doubles as the test for `probeEnvironment`, which can only run in a browser —
+ * the codec probe in particular is the whole reason the report exists.
+ */
+async function dumpDiagnostics(page: import('playwright').Page): Promise<string> {
+  await page.click('button:has-text("Diagnostics")');
+  await page.waitForSelector('pre.report', { timeout: 30_000 });
+  const report = (await page.locator('pre.report').textContent()) ?? '';
+  console.log('\n--- diagnostic report ---');
+  console.log(report);
+  console.log('--- end of report ---');
+  return report;
+}
+
 async function main(): Promise<void> {
   const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
   const root = resolve(positional[0] ?? './sample-shoot');
@@ -141,6 +157,10 @@ async function main(): Promise<void> {
     if (await syncButton.isDisabled()) {
       const reason = (await page.locator('.note.warn p').first().textContent()) ?? '';
       console.log(`\nSync is blocked, and correctly so:\n  ${reason.trim()}`);
+      if (!(await dumpDiagnostics(page)).includes('POLYSYNC DIAGNOSTIC REPORT')) {
+        console.error('FAIL: diagnostic report did not generate');
+        failed = true;
+      }
       await page.screenshot({ path: 'apps/web/smoke.png', fullPage: true });
       console.log('  Screenshot: apps/web/smoke.png');
       if (consoleErrors.length) {
@@ -176,6 +196,12 @@ async function main(): Promise<void> {
 
     const synced = rows.filter((r) => r.status === 'Synced').length;
     console.log(`\n  ${synced} of ${rows.length} synced`);
+
+    const report = await dumpDiagnostics(page);
+    if (!report.includes('POLYSYNC DIAGNOSTIC REPORT') || !report.includes('SOLVE')) {
+      console.error('FAIL: diagnostic report did not generate');
+      failed = true;
+    }
 
     await page.screenshot({ path: 'apps/web/smoke.png', fullPage: true });
     console.log('  Screenshot: apps/web/smoke.png');

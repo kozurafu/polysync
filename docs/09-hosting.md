@@ -100,13 +100,37 @@ demonstrate it.
 
 ## What to ask for back
 
-The point of a hosted test is the failure reports, so ask for:
+**Press Diagnostics, then Copy to clipboard, and send that.** One button, and it
+carries everything worth having:
 
-- The **Skipped** list verbatim — that is the codec and container coverage
-  report, and it is the fastest way to find out which cameras need work.
-- Any clip in **Unsynced** that should have synced, with what it was.
-- Anything in **Matches that disagree** — that section is the consistency
-  checker catching a placement that is confident and wrong, and it is the one
-  thing no other sync tool reports at all.
-- Whether the exported XML actually relinked in their NLE, and what they had to
-  type into "media folder on this machine" to make it work.
+- What the browser can actually decode. `mp4a.40.2=NO` is a one-line answer to
+  a whole class of report that is otherwise a long conversation about which
+  camera and which browser.
+- Every clip's real format, duration, channel count and timecode — and the
+  working rate it was decimated to.
+- Every skipped file with the exact reason it was skipped. This is the codec
+  and container coverage report, and nothing else tells you which cameras need
+  work.
+- How the devices were grouped, on what basis, and whether the user overrode it.
+- The solve: how many pairs were compared and how many each gate ruled out,
+  where every clip landed, and the quality behind it.
+- **Why each unsynced clip did not match** — the closest it came, against which
+  clip, and which of the three acceptance thresholds turned it away. A short
+  overlap and a weak correlation are completely different problems, and the
+  screen cannot tell them apart.
+- Decode and solve timings, which are the only real-world performance numbers
+  that exist.
+
+The report contains **no audio in any form** — no samples, no waveforms,
+nothing derived from the sound. It does contain file names and folder paths,
+because diagnosis is impossible without them, and it is shown on screen in full
+before anyone copies it so they can decide for themselves.
+
+The first bug report on this project arrived as two screenshots and a
+4,170-line XML file, and finding the cause meant parsing that XML with a
+script. Everything needed had been in the app at the time; none of it was
+reachable. That is what this button is for.
+
+Worth also asking, since the report cannot know: **did the exported XML relink
+in their NLE**, and what did they type into "media folder on this machine" to
+make it work.
