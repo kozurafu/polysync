@@ -44,16 +44,21 @@ export interface GateOptions {
    * you would rather fix it here than by regrouping.
    */
   allowSameDeviceMatches: boolean;
-  /** Rule out pairs whose recording windows cannot intersect. */
+  /**
+   * Rule out pairs whose recording windows cannot intersect.
+   *
+   * Only ever acts on a timestamp the file carried itself — see
+   * `AudioClip.recordedAtSource`. A filesystem modification time is never
+   * recording time and is never gated on, whatever this is set to.
+   */
   gateByRecordingTime: boolean;
   /**
    * Slack applied to every recording-time comparison, seconds.
    *
-   * Generous on purpose. A file's modification time is set when the camera
-   * *closed* the file on some cameras and when it opened it on others, cards
-   * get copied, clocks are set wrong, and daylight saving exists. One hour
-   * absorbs all of that and still rules out the morning-versus-afternoon pairs
-   * that make up most of a shoot day.
+   * Generous on purpose. A recorder writes its origination time when it opened
+   * the file, a camera sometimes when it closed one, clocks are set wrong, and
+   * daylight saving exists. One hour absorbs all of that and still rules out
+   * the morning-versus-afternoon pairs that make up most of a shoot day.
    */
   recordingTimeSlopSeconds: number;
   /** Rule out pairs whose best possible envelope correlation is too low. */
@@ -97,6 +102,21 @@ export interface ScreenResult {
 }
 
 /**
+ * The recording time this clip may be judged on, or undefined.
+ *
+ * Only a timestamp the file carried itself counts. A filesystem modification
+ * time is not a recording time: it is rewritten by re-export, transcode,
+ * unzip, AirDrop and every cloud sync, while the recording it supposedly
+ * describes has not moved. Treating one as the other is how a project ends up
+ * with every cross-device pair silently deleted.
+ */
+function trustedRecordingTime(clip: PreparedClip): number | undefined {
+  if (clip.clip.recordedAtSource !== 'metadata') return undefined;
+  const t = clip.clip.recordedAtSeconds;
+  return t != null && Number.isFinite(t) ? t : undefined;
+}
+
+/**
  * Could these two clips have been recording at the same time?
  *
  * `recordedAtSeconds` is a single instant, and we do not know whether the
@@ -105,17 +125,18 @@ export interface ScreenResult {
  * `[t - d - slop, t + d + slop]`. Two clips can only share audio if those
  * windows intersect.
  *
- * Returns true whenever it cannot prove otherwise, including when either clip
- * has no timestamp at all.
+ * Returns true whenever it cannot prove otherwise: when either clip has no
+ * timestamp, and when either timestamp came from the filesystem rather than
+ * from the file.
  */
 export function couldOverlapInTime(
   a: PreparedClip,
   b: PreparedClip,
   slopSeconds: number,
 ): boolean {
-  const ta = a.clip.recordedAtSeconds;
-  const tb = b.clip.recordedAtSeconds;
-  if (ta == null || tb == null || !Number.isFinite(ta) || !Number.isFinite(tb)) return true;
+  const ta = trustedRecordingTime(a);
+  const tb = trustedRecordingTime(b);
+  if (ta === undefined || tb === undefined) return true;
 
   const aFrom = ta - a.durationSeconds - slopSeconds;
   const aTo = ta + a.durationSeconds + slopSeconds;
@@ -147,11 +168,19 @@ export function isSameDevice(a: PreparedClip, b: PreparedClip): boolean {
  * because the user is given a confident answer with a clip missing from it and
  * no indication why.
  *
- * So: if a clip would be excluded from every other clip in the project, its
- * timestamp is not evidence about that clip, it is evidence that its clock is
- * wrong. The gate steps aside for that clip entirely and it goes back to a full
- * search. Costs one pass over the matrix; removes the only way this gate can
- * lose a sync.
+ * So: if a clip would be excluded from every clip it could otherwise have been
+ * compared against, its timestamp is not evidence about that clip, it is
+ * evidence that its clock is wrong. The gate steps aside for that clip entirely
+ * and it goes back to a full search.
+ *
+ * **"Could otherwise have been compared against" means clips on other devices.**
+ * Same-device pairs are already ruled out structurally — a camera records one
+ * clip at a time — so counting them here asks the wrong question, and getting
+ * it wrong is not theoretical. A project of four recorder files and thirty-three
+ * camera files ruled out all 132 cross-device pairs on recording time and
+ * compared nothing at all. Every clip still looked "not isolated", because each
+ * one remained time-compatible with its own siblings, which it was never going
+ * to be compared with anyway. The rescue sat there and watched.
  */
 export function recordingTimeMatrix(
   clips: PreparedClip[],
@@ -167,22 +196,60 @@ export function recordingTimeMatrix(
     }
   }
 
-  for (let i = 0; i < n; i++) {
-    let anyAllowed = false;
-    for (let j = 0; j < n; j++) {
-      if (j !== i && allowed[i][j]) {
-        anyAllowed = true;
-        break;
-      }
-    }
-    if (anyAllowed) continue;
-    // Isolated by its timestamp alone. Trust the audio instead.
+  // Only a pair on two different devices is ever a candidate, so only those
+  // count towards deciding whether a clip has been isolated.
+  const candidate = (i: number, j: number) => i !== j && !isSameDevice(clips[i], clips[j]);
+
+  const rescue = (i: number) => {
     for (let j = 0; j < n; j++) {
       if (j === i) continue;
       allowed[i][j] = true;
       allowed[j][i] = true;
     }
+  };
+
+  for (let i = 0; i < n; i++) {
+    let hasCandidate = false;
+    let anyAllowed = false;
+    for (let j = 0; j < n; j++) {
+      if (!candidate(i, j)) continue;
+      hasCandidate = true;
+      if (allowed[i][j]) {
+        anyAllowed = true;
+        break;
+      }
+    }
+    // Isolated by its timestamp alone. Trust the audio instead.
+    if (hasCandidate && !anyAllowed) rescue(i);
   }
+
+  // The same argument one level up. A whole device can be uniformly wrong —
+  // its files re-exported, its clock set to another timezone, its card copied
+  // by a tool that rewrote every timestamp to the same instant. Then no single
+  // clip looks isolated, because each is still allowed against *some* clip
+  // elsewhere, and yet the device as a whole cannot reach any other device.
+  const byDevice = new Map<string, number[]>();
+  for (let i = 0; i < n; i++) {
+    const key = clips[i].clip.trackId ?? `\u0000clip:${i}`;
+    const list = byDevice.get(key);
+    if (list) list.push(i);
+    else byDevice.set(key, [i]);
+  }
+  if (byDevice.size > 1) {
+    for (const members of byDevice.values()) {
+      let reaches = false;
+      outer: for (const i of members) {
+        for (let j = 0; j < n; j++) {
+          if (candidate(i, j) && allowed[i][j]) {
+            reaches = true;
+            break outer;
+          }
+        }
+      }
+      if (!reaches) for (const i of members) rescue(i);
+    }
+  }
+
   return allowed;
 }
 

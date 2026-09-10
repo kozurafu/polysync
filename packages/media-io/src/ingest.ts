@@ -42,6 +42,14 @@ export interface ProbeResult {
   timecodeSeconds?: number;
   /** Where that timecode came from — worth showing, because they disagree. */
   timecodeSource?: 'tmcd' | 'bext';
+  /**
+   * When the recording started, seconds since epoch, *as stated by the file*.
+   *
+   * Distinct from `File.lastModified` in the only way that matters: this one
+   * survives being copied, and is therefore the only kind of timestamp the sync
+   * gates are allowed to rule a pair out on.
+   */
+  recordedAtSeconds?: number;
   /** Per-channel names from iXML TRACK_LIST, e.g. ["Boom", "Lav1"]. */
   channelNames?: string[];
   /** True when the audio can actually be decoded in this environment. */
@@ -53,7 +61,11 @@ export interface ProbeResult {
 export interface IngestOptions {
   /** Sample rate to decode down to. Defaults to the `chooseWorkingRate` policy. */
   workingRate?: number;
-  /** Recording time, seconds since epoch. From `File.lastModified` in a browser. */
+  /**
+   * Filesystem modification time, seconds since epoch — `File.lastModified` in
+   * a browser. Used only when the file itself states no recording time, and
+   * flagged as untrusted when it is, so nothing gates on it.
+   */
   recordedAtSeconds?: number;
   /** Called with this file's decode progress as a 0..1 fraction. */
   onProgress?: (fraction: number) => void;
@@ -93,6 +105,7 @@ async function probeWav(src: ByteSource): Promise<ProbeResult> {
     frameRate: ixmlFrameRate(ixml),
     timecodeSeconds: start,
     timecodeSource: start !== undefined ? 'bext' : undefined,
+    recordedAtSeconds: bextOriginationSeconds(bext),
     channelNames: ixml?.trackNames,
     decodable: true,
   };
@@ -147,6 +160,29 @@ async function readTmcd(src: ByteSource) {
     // without it, which is the entire point of the tool.
     return undefined;
   }
+}
+
+/**
+ * `bext` origination date and time as an instant, or undefined.
+ *
+ * The two fields are `YYYY-MM-DD` and `HH:MM:SS` with no timezone, so they are
+ * read as UTC. That is a fiction — they are local wall-clock time at the
+ * recorder — but a consistent one: every clip on a shoot is offset by the same
+ * amount, so differences between them, which is all the gate ever looks at,
+ * come out right. Recorders that leave the fields blank or zeroed are common
+ * enough that anything unparseable has to mean "no answer" rather than 1970.
+ */
+export function bextOriginationSeconds(bext: BextInfo | undefined): number | undefined {
+  if (!bext) return undefined;
+  const date = /^(\d{4})[-:/](\d{2})[-:/](\d{2})$/.exec(bext.originationDate.trim());
+  const time = /^(\d{2}):(\d{2}):(\d{2})$/.exec(bext.originationTime.trim());
+  if (!date || !time) return undefined;
+  const [, y, mo, d] = date.map(Number);
+  const [, h, mi, sec] = time.map(Number);
+  // A recorder with a dead clock writes 1970 or 0000; neither is a shoot.
+  if (y < 1990 || y > 2200 || mo < 1 || mo > 12 || d < 1 || d > 31) return undefined;
+  if (h > 23 || mi > 59 || sec > 59) return undefined;
+  return Date.UTC(y, mo - 1, d, h, mi, sec) / 1000;
 }
 
 function wavMetadata(wav: WavInfo): { bext?: BextInfo; ixml?: IXmlInfo } {
@@ -204,7 +240,10 @@ export async function ingest(
     samples: concat(chunks),
     sampleRate: info.sampleRate / factor,
     timecodeSeconds: info.timecodeSeconds,
-    recordedAtSeconds: options.recordedAtSeconds,
+    // The file's own account of when it was recorded beats the filesystem's
+    // account of when it was last written, every time.
+    recordedAtSeconds: info.recordedAtSeconds ?? options.recordedAtSeconds,
+    recordedAtSource: info.recordedAtSeconds !== undefined ? 'metadata' : 'filesystem',
     frameRate: info.frameRate,
   };
   return { probe: info, clip };

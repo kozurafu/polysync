@@ -78,12 +78,16 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
   // when it is needed.
   const warnings = looseCardWarnings(inputs);
 
-  const strategies: Array<{ basis: GroupBasis; key: (i: GroupInput) => string | undefined }> = [
-    { basis: 'card-structure', key: cardDevice },
-    { basis: 'directory', key: topDirectory },
-    { basis: 'filename-prefix', key: filenamePrefix },
-    { basis: 'container-metadata', key: metadataDevice },
-    { basis: 'extension-class', key: extensionClass },
+  // Whole-project rather than per-file, because one of them — the directory
+  // strategy — has to see every path before it can decide which folder level
+  // names the device.
+  const perFile = (key: (i: GroupInput) => string | undefined) => () => inputs.map(key);
+  const strategies: Array<{ basis: GroupBasis; keys: () => Array<string | undefined> }> = [
+    { basis: 'card-structure', keys: perFile(cardDevice) },
+    { basis: 'directory', keys: () => directoryGrouping(inputs) },
+    { basis: 'filename-prefix', keys: perFile(filenamePrefix) },
+    { basis: 'container-metadata', keys: perFile(metadataDevice) },
+    { basis: 'extension-class', keys: perFile(extensionClass) },
   ];
 
   // The first strategy that manages to name every file, kept aside in case no
@@ -93,8 +97,8 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
   // VIDEO.
   let fallback: { basis: GroupBasis; keys: string[] } | undefined;
 
-  for (const { basis, key } of strategies) {
-    const keys = inputs.map(key);
+  for (const { basis, keys: compute } of strategies) {
+    const keys = compute();
     if (keys.some((k) => k === undefined)) continue;
     const named = keys as string[];
     if (!fallback) fallback = { basis, keys: named };
@@ -175,10 +179,124 @@ function looseCardWarnings(inputs: GroupInput[]): string[] {
   return out;
 }
 
-/** Top-level subdirectory of the drop — the way most people actually organise. */
-function topDirectory(input: GroupInput): string | undefined {
-  const parts = input.path.split('/').filter(Boolean);
-  return parts.length > 1 ? sanitise(parts[0]) : undefined;
+/**
+ * The subdirectory that identifies the device — the way most people organise.
+ *
+ * The obvious reading, "the first path segment", is wrong for the shape people
+ * actually use most:
+ *
+ *     Footage/C1/C1_4676.MP4
+ *     Footage/C2/C2_4737.MP4
+ *     Audio/260821_140448_Tr1.WAV
+ *
+ * Two cameras and a recorder. Keying on the first segment calls both cameras
+ * `FOOTAGE`, and since a device cannot match itself, C1 and C2 can then never
+ * be compared — the two clips most likely to sync in the whole project are the
+ * one pair the engine refuses to look at.
+ *
+ * But going deeper by default is just as wrong in the other direction:
+ *
+ *     CAM_A/day1/A001C001.MOV
+ *     CAM_A/day2/A002C001.MOV
+ *
+ * is one camera filed by date, and splitting it invents two devices that are
+ * then free to match each other — which is the take-stacking bug all over again.
+ *
+ * Structurally the two layouts are identical, so the path shape cannot tell
+ * them apart and the depth has to be earned. A deeper level is taken only when
+ * something corroborates it:
+ *
+ *   - the folder's name is echoed in the names of the files inside it, which is
+ *     a camera labelling its own output (`C1/` holding `C1_4676.MP4`); or
+ *   - two sibling folders hold a file of the same name, which one device cannot
+ *     do (`A/C0001.MP4` and `B/C0001.MP4` — two cards, default naming).
+ *
+ * Neither fires for `day1`/`day2`, and both fire for real second cameras.
+ */
+function directoryGrouping(inputs: GroupInput[]): Array<string | undefined> {
+  const split = inputs.map((i) => i.path.split('/').filter(Boolean));
+  const maxDepth = Math.max(...split.map((p) => p.length - 1));
+  if (maxDepth < 1) return inputs.map(() => undefined);
+
+  // A file shallower than the current depth keeps the deepest folder it has, so
+  // a stray clip beside the camera folders stays its own device rather than
+  // being dropped and failing the whole strategy.
+  const foldersAt = (depth: number) =>
+    split.map((parts) => parts.slice(0, Math.min(depth, Math.max(1, parts.length - 1))));
+
+  let depth = 1;
+  while (depth < maxDepth && deeperIsEarned(split, foldersAt(depth), depth)) depth++;
+
+  return foldersAt(depth).map((parts, i) =>
+    split[i].length > 1 ? sanitise(parts.join('-')) : undefined,
+  );
+}
+
+/** Is there evidence that the folders one level below `depth` are real devices? */
+function deeperIsEarned(
+  split: string[][],
+  current: string[][],
+  depth: number,
+): boolean {
+  // Group the files by the folder they currently sit in, and look at what the
+  // next level down would do to each group in turn. One corroborated parent is
+  // enough: the layout is uniform in practice, and the alternative is losing
+  // the split because one folder happened not to be subdivided.
+  const byParent = new Map<string, number[]>();
+  for (let i = 0; i < split.length; i++) {
+    const key = current[i].join('/');
+    const list = byParent.get(key);
+    if (list) list.push(i);
+    else byParent.set(key, [i]);
+  }
+
+  for (const members of byParent.values()) {
+    const children = new Map<string, number[]>();
+    for (const i of members) {
+      // Only files that actually have a folder at the next level down.
+      if (split[i].length - 1 <= depth) continue;
+      const child = split[i][depth];
+      const list = children.get(child);
+      if (list) list.push(i);
+      else children.set(child, [i]);
+    }
+    if (children.size < 2) continue;
+
+    // (a) the folder names itself in its files
+    let echoed = 0;
+    for (const [child, members2] of children) {
+      const token = normaliseToken(child);
+      if (!token) continue;
+      const hits = members2.filter((i) =>
+        normaliseToken(basenameOf(split[i])).startsWith(token),
+      ).length;
+      if (hits * 2 > members2.length) echoed++;
+    }
+    if (echoed === children.size) return true;
+
+    // (b) the same filename under two siblings, which one device cannot produce
+    const seen = new Map<string, string>();
+    for (const [child, members2] of children) {
+      for (const i of members2) {
+        const name = basenameOf(split[i]).toLowerCase();
+        const owner = seen.get(name);
+        if (owner !== undefined && owner !== child) return true;
+        seen.set(name, child);
+      }
+    }
+  }
+  return false;
+}
+
+function basenameOf(parts: string[]): string {
+  const name = parts[parts.length - 1] ?? '';
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** Letters and digits only, uppercased — so `C1` matches `C1_4676` and `C1-4676`. */
+function normaliseToken(text: string): string {
+  return text.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 }
 
 /**

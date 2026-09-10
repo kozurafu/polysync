@@ -23,6 +23,7 @@ export interface SyncRequest {
     sampleRate: number;
     timecodeSeconds?: number;
     recordedAtSeconds?: number;
+    recordedAtSource?: 'metadata' | 'filesystem';
     frameRate?: number;
   }>;
 }
@@ -46,6 +47,7 @@ self.onmessage = (event: MessageEvent<SyncRequest>) => {
       sampleRate: c.sampleRate,
       timecodeSeconds: c.timecodeSeconds,
       recordedAtSeconds: c.recordedAtSeconds,
+      recordedAtSource: c.recordedAtSource,
       frameRate: c.frameRate,
     }));
 

@@ -128,6 +128,7 @@ function buildShoot(opts: Options): AudioClip[] {
         sampleRate: SR,
         // mtime as a card offload preserves it: when the file was closed.
         recordedAtSeconds: sceneStart + offsetIntoScene + clipSeconds,
+        recordedAtSource: 'metadata' as const,
       });
       made++;
     }

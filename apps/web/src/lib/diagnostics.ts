@@ -99,9 +99,19 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     const devices = uniqueDevices(input);
     line(`devices            ${devices.length}  (${devices.join(', ')})`);
     line(`grouped by         ${input.grouping.basis}`);
+  }
+  {
+    // Which clips carry a recording time the gates are allowed to act on. A
+    // filesystem modification time is not one, and this line is here so that
+    // never has to be guessed at again from a report.
+    const stated = input.clips.filter((c) => c.recordedAtSource === 'metadata').length;
+    line(
+      `stated rec. time   ${stated} of ${input.clips.length} clips` +
+        (stated === 0 ? '  (none — the recording-time gate is inert, as intended)' : ''),
+    );
     const overridden = Object.keys(input.overrides).length;
     if (overridden) line(`device overrides   ${overridden} clip(s) reassigned by hand`);
-    for (const warning of input.grouping.warnings) line(`  ! ${warning}`);
+    if (input.grouping) for (const warning of input.grouping.warnings) line(`  ! ${warning}`);
   }
   line(`sequence name      ${input.settings.projectName}`);
   line(`frame rate         ${input.settings.frameRate}`);
@@ -174,6 +184,23 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     line(`  skipped rec time ${stats.skippedByRecordingTime}`);
     line(`  skipped envelope ${stats.skippedByEnvelope}`);
     line(`accepted edges     ${result.pairs.filter((p) => p.accepted).length}`);
+
+    // Zero comparisons is not a result, it is a broken run: the solve finished
+    // without ever looking at any audio, so nothing it reports below means
+    // anything. Say so here rather than leaving it to be inferred from three
+    // numbers adding up.
+    if (stats.totalPairs > 0 && stats.aligned === 0) {
+      line('');
+      line('  !! NO PAIR WAS EVER COMPARED. The gates ruled out all ' + stats.totalPairs +
+        ' of them,');
+      line('     so this run could not have synced anything whatever the audio said.');
+      if (stats.skippedBySameDevice === stats.totalPairs) {
+        line('     Every pair was same-device: the grouping thinks this is one device.');
+        line('     Set the right device on some clips and run it again.');
+      } else if (stats.skippedByRecordingTime > 0) {
+        line('     ' + stats.skippedByRecordingTime + ' were ruled out on recording time.');
+      }
+    }
 
     heading('PLACEMENTS');
     line(pad('CLIP', 34) + pad('DEVICE', 12) + pad('START', 12) + pad('QUALITY', 9) + pad('DRIFT', 12) + 'STATUS');

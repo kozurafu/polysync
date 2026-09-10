@@ -33,6 +33,7 @@ export type IngestResponse =
       peaks: Float32Array;
       timecodeSeconds?: number;
       recordedAtSeconds?: number;
+      recordedAtSource?: 'metadata' | 'filesystem';
       frameRate?: number;
     }
   | { type: 'error'; id: string; message: string };
@@ -47,6 +48,8 @@ self.onmessage = async (event: MessageEvent<IngestRequest>) => {
     const source = blobSource(file, relativePath);
     const { clip, probe } = await ingest(source, id, {
       workingRate,
+      // Offered as a fallback only. `ingest` prefers whatever the file itself
+      // says and marks the result, so the gates can tell the two apart.
       recordedAtSeconds: file.lastModified / 1000,
       onProgress: (fraction) => post({ type: 'progress', id, fraction }),
     });
@@ -68,6 +71,7 @@ self.onmessage = async (event: MessageEvent<IngestRequest>) => {
         peaks,
         timecodeSeconds: clip.timecodeSeconds,
         recordedAtSeconds: clip.recordedAtSeconds,
+        recordedAtSource: clip.recordedAtSource,
         frameRate: clip.frameRate,
       },
       [buffer],

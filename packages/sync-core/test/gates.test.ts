@@ -4,6 +4,7 @@ import {
   DEFAULT_GATE_OPTIONS,
   couldOverlapInTime,
   maxEnvelopeCorrelation,
+  recordingTimeMatrix,
   screenPair,
 } from '../src/gates.js';
 import { overlapCorrelation } from '../src/gccphat.js';
@@ -23,8 +24,18 @@ const OPTS = {
 
 const UNGATED = { ...OPTS, gateByRecordingTime: false, envelopePrefilter: false };
 
+/**
+ * A clip. When a `recordedAtSeconds` is supplied it is stamped as coming from
+ * the file's own metadata, because that is the only kind the gates act on — a
+ * filesystem timestamp is deliberately inert, and the tests that care about
+ * that say so explicitly.
+ */
 function clip(id: string, samples: Float64Array, extra: Partial<AudioClip> = {}): AudioClip {
-  return { id, samples, sampleRate: SR, name: id, ...extra };
+  const source: Partial<AudioClip> =
+    extra.recordedAtSeconds !== undefined && extra.recordedAtSource === undefined
+      ? { recordedAtSource: 'metadata' }
+      : {};
+  return { id, samples, sampleRate: SR, name: id, ...extra, ...source };
 }
 
 function prep(c: AudioClip) {
@@ -38,10 +49,22 @@ function prep(c: AudioClip) {
  * never a sample, so these tests use a low sample rate to keep the decimation
  * in `prepareClip` from dominating the suite.
  */
-function timedClip(id: string, seconds: number, recordedAtSeconds?: number) {
+function timedClip(
+  id: string,
+  seconds: number,
+  recordedAtSeconds?: number,
+  extra: Partial<AudioClip> = {},
+) {
   const rate = 100;
   return prepareClip(
-    { id, samples: new Float64Array(Math.round(seconds * rate)), sampleRate: rate, recordedAtSeconds },
+    {
+      id,
+      samples: new Float64Array(Math.round(seconds * rate)),
+      sampleRate: rate,
+      recordedAtSeconds,
+      recordedAtSource: recordedAtSeconds === undefined ? undefined : 'metadata',
+      ...extra,
+    },
     { ...DEFAULT_ALIGN_OPTIONS, fineRate: rate },
   );
 }
@@ -91,6 +114,135 @@ describe('couldOverlapInTime', () => {
     const a = timedClip('a', 600, 2_000_000);
     const b = timedClip('b', 600, 2_000_000);
     expect(couldOverlapInTime(a, b, slop)).toBe(true);
+  });
+});
+
+describe('a filesystem timestamp is not a recording time', () => {
+  // Reported 2026-09-10, and the worst possible shape of failure: a real
+  // project of 4 recorder files and 33 camera files, 666 pairs, 534 correctly
+  // skipped as same-device — and all 132 remaining pairs ruled out on
+  // recording time. Zero pairs compared. Nothing synced. Twenty-nine seconds
+  // of solve that could not have produced an answer.
+  //
+  // The cause was `File.lastModified`. The recorder files had been through a
+  // speech-isolation pass and carried that day's modification time; the camera
+  // files had been copied off cards with 2021 timestamps intact. Five years
+  // apart, so every cross-device pair failed the one-hour window. The audio
+  // was perfectly syncable and never got looked at.
+  const slop = DEFAULT_GATE_OPTIONS.recordingTimeSlopSeconds;
+
+  it('never rules a pair out on a filesystem timestamp', () => {
+    const a = timedClip('a', 10, 1_000_000, { recordedAtSource: 'filesystem' });
+    const b = timedClip('b', 10, 1_000_000 + 5 * 365 * 24 * 3600, {
+      recordedAtSource: 'filesystem',
+    });
+    expect(couldOverlapInTime(a, b, slop)).toBe(true);
+  });
+
+  it('does not act on a timestamp of unstated origin either', () => {
+    const a = prepareClip(
+      { id: 'a', samples: new Float64Array(1000), sampleRate: 100, recordedAtSeconds: 0 },
+      { ...DEFAULT_ALIGN_OPTIONS, fineRate: 100 },
+    );
+    const b = prepareClip(
+      { id: 'b', samples: new Float64Array(1000), sampleRate: 100, recordedAtSeconds: 9e8 },
+      { ...DEFAULT_ALIGN_OPTIONS, fineRate: 100 },
+    );
+    expect(couldOverlapInTime(a, b, slop)).toBe(true);
+  });
+
+  it('still rules one out when both files stated the time themselves', () => {
+    const a = timedClip('a', 10, 1_000_000);
+    const b = timedClip('b', 10, 1_000_000 + 4 * 3600);
+    expect(couldOverlapInTime(a, b, slop)).toBe(false);
+  });
+
+  it('reproduces the reported project: every cross-device pair survives', () => {
+    const day = 1_600_000_000;
+    const reprocessed = day + 5 * 365 * 24 * 3600;
+    const clips = [
+      ...[0, 1, 2, 3].map((i) =>
+        timedClip(`mp3${i}`, 60, reprocessed + i * 60, {
+          trackId: 'AUDIO',
+          recordedAtSource: 'filesystem',
+        }),
+      ),
+      ...Array.from({ length: 8 }, (_, i) =>
+        timedClip(`mp4${i}`, 30, day + i * 30, {
+          trackId: 'VIDEO',
+          recordedAtSource: 'filesystem',
+        }),
+      ),
+    ];
+    const allowed = recordingTimeMatrix(clips, slop);
+    let cross = 0;
+    for (let i = 0; i < clips.length; i++) {
+      for (let j = i + 1; j < clips.length; j++) {
+        if (clips[i].clip.trackId === clips[j].clip.trackId) continue;
+        cross++;
+        expect(allowed[i][j], `${clips[i].clip.id} vs ${clips[j].clip.id}`).toBe(true);
+      }
+    }
+    expect(cross).toBe(32);
+  });
+});
+
+describe('the wrong-clock rescue', () => {
+  const slop = DEFAULT_GATE_OPTIONS.recordingTimeSlopSeconds;
+
+  it('rescues a whole device whose clock is wrong, not just a lone clip', () => {
+    // The second half of the same failure. The clip-level rescue asked whether
+    // a clip was excluded from *every other clip*, and each recorder file was
+    // still time-compatible with its three siblings — which it was never going
+    // to be compared with anyway, being the same device. So no clip looked
+    // isolated, the rescue never fired, and the device silently vanished.
+    const day = 1_600_000_000;
+    const clips = [
+      ...[0, 1, 2, 3].map((i) =>
+        timedClip(`rec${i}`, 60, day + 40 * 3600 + i * 60, { trackId: 'AUDIO' }),
+      ),
+      ...Array.from({ length: 6 }, (_, i) =>
+        timedClip(`cam${i}`, 30, day + i * 30, { trackId: 'VIDEO' }),
+      ),
+    ];
+    const allowed = recordingTimeMatrix(clips, slop);
+    for (let i = 0; i < 4; i++) {
+      for (let j = 4; j < clips.length; j++) {
+        expect(allowed[i][j], `${clips[i].clip.id} vs ${clips[j].clip.id}`).toBe(true);
+      }
+    }
+  });
+
+  it('still gates within a device that can reach the others', () => {
+    // The rescue must not become a way of turning the gate off. Three cameras,
+    // all clocks agreed: C1 overlaps C2, C3 is four hours later. C3 reaches
+    // nobody and is rescued; the C1/C2 gating is untouched.
+    const day = 1_600_000_000;
+    const clips = [
+      timedClip('c1', 30, day, { trackId: 'C1' }),
+      timedClip('c2', 30, day + 10, { trackId: 'C2' }),
+      timedClip('c3', 30, day + 4 * 3600, { trackId: 'C3' }),
+    ];
+    const allowed = recordingTimeMatrix(clips, slop);
+    expect(allowed[0][1]).toBe(true);
+    // c3 was isolated from everything, so it is exempt in both directions.
+    expect(allowed[0][2]).toBe(true);
+    expect(allowed[1][2]).toBe(true);
+  });
+
+  it('keeps ruling out pairs when every device can still reach another', () => {
+    const day = 1_600_000_000;
+    const clips = [
+      timedClip('a1', 30, day, { trackId: 'A' }),
+      timedClip('a2', 30, day + 8 * 3600, { trackId: 'A' }),
+      timedClip('b1', 30, day + 10, { trackId: 'B' }),
+      timedClip('b2', 30, day + 8 * 3600 + 10, { trackId: 'B' }),
+    ];
+    const allowed = recordingTimeMatrix(clips, slop);
+    expect(allowed[0][2]).toBe(true); // morning vs morning
+    expect(allowed[1][3]).toBe(true); // afternoon vs afternoon
+    expect(allowed[0][3]).toBe(false); // eight hours apart, and correctly cut
+    expect(allowed[1][2]).toBe(false);
   });
 });
 

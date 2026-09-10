@@ -33,6 +33,7 @@ export interface IngestedClip {
   peaks: Float32Array;
   timecodeSeconds?: number;
   recordedAtSeconds?: number;
+  recordedAtSource?: 'metadata' | 'filesystem';
   frameRate?: number;
   /** Held only until it is handed to the sync worker, then released. */
   samples?: ArrayBuffer;
@@ -137,6 +138,7 @@ export async function ingestFiles(
                   peaks: message.peaks,
                   timecodeSeconds: message.timecodeSeconds,
                   recordedAtSeconds: message.recordedAtSeconds,
+                  recordedAtSource: message.recordedAtSource,
                   frameRate: message.frameRate,
                   samples: message.samples,
                 });
@@ -193,6 +195,7 @@ export function solve(
           sampleRate: clip.sampleRate,
           timecodeSeconds: clip.timecodeSeconds,
           recordedAtSeconds: clip.recordedAtSeconds,
+          recordedAtSource: clip.recordedAtSource,
           frameRate: clip.frameRate,
         };
       }),

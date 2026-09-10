@@ -25,6 +25,79 @@ describe('groupClips', () => {
     expect(result.deviceIds).toEqual(['CAM_A', 'CAM_B']);
   });
 
+  it('separates cameras that sit inside a shared parent folder', () => {
+    // Reported 2026-09-10 from a real 249-file project laid out exactly like
+    // this. Keying on the first path segment called both cameras FOOTAGE, and
+    // since a device cannot match itself, C1 and C2 — the two most likely
+    // things in the project to sync — became the one pair the engine would
+    // never look at.
+    const result = groupClips(
+      inputs(
+        'Audio/260821_140448_Tr1.WAV',
+        'Audio/260821_153800_Tr1.WAV',
+        'Footage/C1/C1_4676.MP4',
+        'Footage/C1/C1_4677.MP4',
+        'Footage/C2/C2_4737.MP4',
+        'Footage/C2/C2_4738.MP4',
+      ),
+    );
+    expect(result.basis).toBe('directory');
+    expect(deviceOf(result, 'c0')).toBe('AUDIO');
+    expect(deviceOf(result, 'c2')).toBe('FOOTAGE-C1');
+    expect(deviceOf(result, 'c4')).toBe('FOOTAGE-C2');
+    expect(result.deviceIds).toHaveLength(3);
+  });
+
+  it('does not go deeper than it needs to', () => {
+    // One camera's rushes filed by date. Splitting on the day would invent
+    // three devices out of one, and each would then be barred from matching
+    // the others.
+    const result = groupClips(
+      inputs(
+        'CAM_A/day1/a.mov',
+        'CAM_A/day2/b.mov',
+        'CAM_A/day3/c.mov',
+        'REC/mix.wav',
+      ),
+    );
+    expect(result.deviceIds).toEqual(['CAM_A', 'REC']);
+  });
+
+  it('keeps a clip that sits beside the camera folders rather than failing', () => {
+    const result = groupClips(
+      inputs('Footage/C1/a.mov', 'Footage/C2/b.mov', 'Audio/mix.wav'),
+    );
+    expect(result.basis).toBe('directory');
+    expect(deviceOf(result, 'c2')).toBe('AUDIO');
+  });
+
+  it('splits two cards that use identical default filenames', () => {
+    // Two Sony bodies both start at C0001. The folder names say nothing, but
+    // one device cannot write the same filename twice, so the collision is
+    // proof on its own.
+    const result = groupClips(
+      inputs(
+        'Footage/A/C0001.MP4',
+        'Footage/A/C0002.MP4',
+        'Footage/B/C0001.MP4',
+        'Footage/B/C0002.MP4',
+      ),
+    );
+    expect(result.deviceIds).toEqual(['FOOTAGE-A', 'FOOTAGE-B']);
+  });
+
+  it('does not split one camera filed by date, whatever the reel numbers say', () => {
+    const result = groupClips(
+      inputs(
+        'CAM_A/day1/A001C001.MOV',
+        'CAM_A/day1/A001C002.MOV',
+        'CAM_A/day2/A002C001.MOV',
+        'REC/mix.wav',
+      ),
+    );
+    expect(result.deviceIds).toEqual(['CAM_A', 'REC']);
+  });
+
   it('recognises XDCAM BPAV and P2 Contents layouts', () => {
     const xdcam = groupClips(
       inputs('CardOne/BPAV/CLPR/CLIP0001/CLIP0001.MP4', 'CardTwo/BPAV/CLPR/CLIP0001/CLIP0001.MP4'),

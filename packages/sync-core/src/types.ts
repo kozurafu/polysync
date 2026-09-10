@@ -10,8 +10,24 @@ export interface AudioClip {
   sampleRate: number;
   /** Start timecode in seconds since midnight, if the file carried one. */
   timecodeSeconds?: number;
-  /** File modification / recording start time, seconds since epoch. Weak hint only. */
+  /** Recording start time, seconds since epoch. */
   recordedAtSeconds?: number;
+  /**
+   * Where `recordedAtSeconds` came from, which decides whether anything may act
+   * on it.
+   *
+   * `'metadata'` means the file said so itself — a `bext` origination date, a
+   * container creation time. That travels with the file through a copy and is
+   * evidence about when the recording happened.
+   *
+   * `'filesystem'` means `File.lastModified`, which is evidence about when the
+   * *file* was last written and nothing more. Re-exporting, transcoding,
+   * unzipping, AirDropping or syncing to a cloud drive all rewrite it, and none
+   * of those change the recording. Never rule a pair out on it.
+   *
+   * Absent means untrusted, same as `'filesystem'`.
+   */
+  recordedAtSource?: 'metadata' | 'filesystem';
   /** Video frame rate, if this clip has picture. Used for timecode maths on export. */
   frameRate?: number;
 }

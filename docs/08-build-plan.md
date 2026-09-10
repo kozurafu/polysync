@@ -327,6 +327,56 @@ The lesson for the test corpus: the fixtures modelled the degradations we
 thought of — level, bandwidth, noise, drift. They did not model *the wrong
 shape of project*, which is what a real user actually hands you.
 
+## 7.4 What the second real shoot found
+
+249 files, three cameras and a sound recorder, 6.6 hours of audio. The first
+genuinely multi-device project the tool has seen. It produced **nothing**:
+666 pairs, 534 correctly skipped as same-device, and all 132 remaining pairs
+ruled out on recording time. Zero comparisons. Twenty-nine seconds of solve
+that could not have returned an answer whatever the audio contained.
+
+Two defects, and it took both of them to produce a total failure:
+
+1. **`File.lastModified` was being used as recording time.** It is not one. It
+   records when the *file* was last written, and re-export, transcode, unzip,
+   AirDrop and every cloud sync rewrite it while the recording stays put. On
+   this project the recorder files had been through a speech-isolation pass and
+   carried that day's date; the camera files had been copied off cards with
+   their 2021 timestamps intact. Five years apart, so every cross-device pair
+   failed a one-hour window.
+
+   Recording time is now only acted on when the file states it itself —
+   `bext` origination, which this project's WAVs carried — and a filesystem
+   timestamp is kept, displayed, and never gated on. See
+   `AudioClip.recordedAtSource`.
+
+2. **The wrong-clock rescue was asking the wrong question.** It exempted a clip
+   excluded from *every other clip*, and each recorder file was still
+   time-compatible with its three siblings — which it was never going to be
+   compared with anyway, being the same device. So no clip looked isolated, the
+   safety net never fired, and an entire device vanished silently. It now counts
+   only cross-device candidates, and rescues a whole device that cannot reach
+   any other one.
+
+A third defect showed up in the same report without having caused this failure
+yet: `Footage/C1/` and `Footage/C2/` both grouped as `FOOTAGE`, because the
+directory strategy read only the first path segment. Since a device cannot match
+itself, the two cameras most likely to sync in the whole project were the one
+pair the engine would never look at. Folder depth is now earned rather than
+assumed — a deeper level is taken only when the folder names itself in its files
+(`C1/` holding `C1_4676.MP4`) or two siblings hold the same filename, neither of
+which a single camera filed by date can do.
+
+Two lessons, and they are not the same one:
+
+- **A gate that fails silently is worse than no gate.** The measured benefit of
+  the recording-time gate was 1.3×; the cost of it being wrong was the entire
+  product. That is a bad trade at any speedup, and the reason the gate now
+  demands evidence before it is allowed to delete work.
+- **"Compared zero pairs" is a broken run, not a result.** The report printed
+  the three numbers that showed it and left them to be added up. It now says so
+  outright.
+
 ---
 
 ## 8. Decisions that are actually open
