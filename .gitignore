@@ -11,3 +11,8 @@ coverage/
 
 /apps/web/dist/
 apps/web/smoke.png
+
+# The distributable, rebuilt by `npm run build` and zipped for hosting. A build
+# artifact of tracked sources, so committing it only ever means shipping a stale
+# one by accident.
+/polysync-web.zip
