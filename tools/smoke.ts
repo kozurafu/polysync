@@ -190,18 +190,32 @@ async function checkXmlExport(
   console.log(`\nExported XML: ${tracks} tracks for ${clipCount} clips`);
   for (const comment of comments) console.log(`  ${comment}`);
 
-  // The default layout is one track per clip, so no two clips may share one.
-  const perTrack = new Map<string, number>();
-  for (const comment of comments) {
-    const track = comment.replace(/ ch\d+$/, '');
-    perTrack.set(track, (perTrack.get(track) ?? 0) + 1);
+  // Clips share tracks now — one per camera — so the invariant is no longer
+  // "one clip per track" but the thing that rule was protecting: two clips on
+  // one track must never overlap, or the later one hides behind the earlier
+  // and is indistinguishable from a clip that never imported.
+  const trackBlocks = xml.split('<track>').slice(1);
+  for (const block of trackBlocks) {
+    const label = /<!-- (.*?) -->/.exec(block)?.[1] ?? '(unnamed)';
+    const spans = [...block.matchAll(/<start>(-?\d+)<\/start>\s*<end>(-?\d+)<\/end>/g)]
+      .map((m) => ({ from: Number(m[1]), to: Number(m[2]) }))
+      .sort((a, b) => a.from - b.from);
+    for (let i = 1; i < spans.length; i++) {
+      if (spans[i].from < spans[i - 1].to) {
+        console.error(
+          `FAIL: two clips overlap on track "${label}" ` +
+            `(${spans[i - 1].from}-${spans[i - 1].to} and ${spans[i].from}-${spans[i].to})`,
+        );
+        ok = false;
+      }
+    }
   }
-  if (perTrack.size < clipCount) {
-    console.error(
-      `FAIL: ${clipCount} clips share only ${perTrack.size} tracks — clips can hide each other`,
-    );
-    ok = false;
-  }
+  console.log(`No clip hides behind another: checked ${trackBlocks.length} tracks`);
+
+  // The supplied audio belongs on A1, ahead of any camera's scratch track.
+  const audioTracks = comments.filter((c) => / ch\d+$/.test(c));
+  if (audioTracks.length) console.log(`A1 is: ${audioTracks[0]}`);
+  void clipCount;
 
   // The sequence must declare its own frame size, or the NLE invents sequence
   // settings and the footage arrives the wrong shape. Only meaningful when

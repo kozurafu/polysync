@@ -13,6 +13,16 @@ export interface TimelineClip {
    * gets its own value, so `trackLabel` carries the device for display.
    */
   trackId: string;
+  /**
+   * Video and audio track, when they differ.
+   *
+   * A camera clip's picture and its scratch audio are laid out under separate
+   * budgets — four video tracks, ten audio ones — so the two cannot always be
+   * the same lane. Either falling back to `trackId` keeps the simple case
+   * simple.
+   */
+  videoTrackId?: string;
+  audioTrackId?: string;
   /** What to call the track. Defaults to `trackId`. */
   trackLabel?: string;
   /** Position on the project timeline, seconds. */

@@ -34,24 +34,97 @@ export interface ExportInput {
   /** Absolute folder the media was picked from, e.g. `D:\Rushes\Day1`. */
   mediaRoot: string;
   rate: FrameRate;
-  /** How clips are laid onto NLE tracks. Defaults to `per-clip`. */
+  /** How clips are laid onto NLE tracks. Defaults to `per-device`. */
   trackLayout?: TrackLayout;
+  /** Track budget for the per-device layout. Defaults to `DEFAULT_TRACK_LIMITS`. */
+  limits?: TrackLimits;
 }
 
 /**
  * How solved clips are distributed across NLE tracks.
  *
- * `per-device` is what PluralEyes did: one track per camera, angles stacked,
- * ready to cut between. It is the compact answer and the right one for a
- * conventional multicam edit.
+ * `per-device` is what PluralEyes did, and what the app's own timeline shows:
+ * one track per camera, angles stacked, ready to cut between. It is the
+ * default, because it is the layout an editor actually cuts from.
  *
  * `per-clip` gives every source file a track of its own — 33 files, 33 video
- * tracks. It is the default because a track holds one clip at a time, so
- * anything sharing a track can hide behind whatever the solve put next to it,
- * and a clip you cannot see is indistinguishable from one that failed to
- * import. It costs a tall timeline and guarantees you can see everything.
+ * tracks. Nothing can ever hide behind anything, at the cost of a timeline too
+ * tall to read. Useful when a solve is under suspicion and you want to see
+ * every clip laid out separately.
  */
 export type TrackLayout = 'per-clip' | 'per-device';
+
+/**
+ * How many tracks the per-device layout may use before it starts packing.
+ *
+ * Four video, because four angles is a large multicam shoot and a taller stack
+ * than that is unreadable. Ten audio, because the budget has to cover the sound
+ * recorder *plus* every camera's scratch audio, and FCP7 XML has no notion of a
+ * stereo clip on one timeline track — a two-channel source is two clipitems on
+ * two tracks. One recorder and four stereo cameras is nine.
+ *
+ * Both are targets rather than hard limits. A clip is never dropped and never
+ * hidden to respect them: if packing cannot fit a clip onto an existing track
+ * without covering something already there, it gets another track and
+ * `trackOverflow` says so.
+ */
+export interface TrackLimits {
+  maxVideoTracks: number;
+  maxAudioTracks: number;
+}
+
+export const DEFAULT_TRACK_LIMITS: TrackLimits = {
+  maxVideoTracks: 4,
+  maxAudioTracks: 10,
+};
+
+interface Span {
+  from: number;
+  to: number;
+}
+
+/** Would this clip cover something already on the lane? */
+function collides(lane: Span[], span: Span): boolean {
+  // Touching end-to-start is fine — that is how a camera's own takes sit.
+  return lane.some((s) => span.from < s.to && s.from < span.to);
+}
+
+/**
+ * Assign each device a lane, packing only when the budget runs out.
+ *
+ * Devices are laid out in the given order, each taking a lane of its own while
+ * lanes remain. Past the limit a device joins the first lane whose clips it
+ * does not overlap — two cameras that never rolled at the same time can share
+ * a track without either disappearing — and only when every lane collides does
+ * it take a new one beyond the budget.
+ *
+ * Returns the lane index per device, and how many lanes were needed.
+ */
+export function packLanes(
+  devices: Array<{ device: string; spans: Span[]; cost: number }>,
+  budget: number,
+): { laneOf: Map<string, number>; lanes: Span[][]; overflowed: boolean } {
+  const laneOf = new Map<string, number>();
+  const lanes: Span[][] = [];
+  // A lane can cost more than one track — a stereo source occupies two — so
+  // the budget is counted in tracks and spent as lanes are opened.
+  let spent = 0;
+  let overflowed = false;
+
+  for (const { device, spans, cost } of devices) {
+    const roomForNewLane = spent + cost <= budget;
+    let index = roomForNewLane ? -1 : lanes.findIndex((lane) => !spans.some((s) => collides(lane, s)));
+    if (index === -1) {
+      if (!roomForNewLane) overflowed = true;
+      index = lanes.length;
+      lanes.push([]);
+      spent += cost;
+    }
+    lanes[index].push(...spans);
+    laneOf.set(device, index);
+  }
+  return { laneOf, lanes, overflowed };
+}
 
 /** Common frame rates, as an editor names them. */
 export const FRAME_RATES: Array<{ label: string; rate: FrameRate }> = [
@@ -109,11 +182,11 @@ function basename(path: string): string {
 
 export function buildTimeline(input: ExportInput): TimelineProject {
   const byId = new Map(input.clips.map((c) => [c.id, c]));
-  const layout = input.trackLayout ?? 'per-clip';
+  const layout = input.trackLayout ?? 'per-device';
   // Keyed on the clip id, not its name: two cards routinely hold files of the
   // same name (`A/C0001.MP4` and `B/C0001.MP4`), and two clips sharing a track
-  // is the one thing this layout exists to prevent. The readable name goes in
-  // the label instead.
+  // is the one thing the per-clip layout exists to prevent. The readable name
+  // goes in the label instead.
   const trackName = (clipId: string) => (layout === 'per-clip' ? clipId : input.deviceOf(clipId));
 
   const clips: TimelineClip[] = input.result.placements.map((placement) => {
@@ -143,7 +216,69 @@ export function buildTimeline(input: ExportInput): TimelineProject {
     };
   });
 
+  if (layout === 'per-device') assignDeviceLanes(clips, input.limits ?? DEFAULT_TRACK_LIMITS);
+
   return { name: input.projectName, rate: input.rate, clips };
+}
+
+/**
+ * Give each device a video lane and an audio lane, within the track budget.
+ *
+ * The two are packed separately because they are spent differently: a camera
+ * costs one video track and two audio ones, and the sound recorder costs no
+ * video at all. Devices are ordered so that the supplied audio — anything with
+ * no picture — is laid out first and lands on A1, which is where an editor
+ * looks for it.
+ */
+function assignDeviceLanes(clips: TimelineClip[], limits: TrackLimits): void {
+  const byDevice = new Map<string, TimelineClip[]>();
+  for (const clip of clips) {
+    const list = byDevice.get(clip.trackId);
+    if (list) list.push(clip);
+    else byDevice.set(clip.trackId, [clip]);
+  }
+
+  const devices = [...byDevice.entries()]
+    .map(([device, on]) => ({
+      device,
+      on,
+      audioOnly: on.every((c) => !c.hasVideo),
+      start: Math.min(...on.map((c) => c.startSeconds)),
+      channels: Math.max(1, ...on.map((c) => c.audioChannels ?? 2)),
+    }))
+    .sort((a, b) => Number(a.audioOnly) - Number(b.audioOnly) || a.start - b.start);
+
+  const spansOf = (on: TimelineClip[]) =>
+    on.map((c) => ({ from: c.startSeconds, to: c.startSeconds + c.durationSeconds }));
+
+  const video = packLanes(
+    devices
+      .filter((d) => d.on.some((c) => c.hasVideo))
+      .map((d) => ({ device: d.device, spans: spansOf(d.on.filter((c) => c.hasVideo)), cost: 1 })),
+    limits.maxVideoTracks,
+  );
+
+  // Audio is laid out recorder-first, so its lane 0 is A1.
+  const audio = packLanes(
+    [...devices]
+      .filter((d) => d.on.some((c) => c.hasAudio))
+      .sort((a, b) => Number(a.audioOnly) - Number(b.audioOnly) || a.start - b.start)
+      .map((d) => ({
+        device: d.device,
+        spans: spansOf(d.on.filter((c) => c.hasAudio)),
+        cost: d.channels,
+      })),
+    limits.maxAudioTracks,
+  );
+
+  for (const clip of clips) {
+    const v = video.laneOf.get(clip.trackId);
+    const a = audio.laneOf.get(clip.trackId);
+    // Padded so the lane ids sort in lane order, which is the order the tracks
+    // are emitted in.
+    if (v !== undefined) clip.videoTrackId = `V${String(v).padStart(3, '0')}`;
+    if (a !== undefined) clip.audioTrackId = `A${String(a).padStart(3, '0')}`;
+  }
 }
 
 export interface ExportedFile {

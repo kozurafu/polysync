@@ -44,7 +44,7 @@ export function App() {
   const [dragOver, setDragOver] = useState(false);
   const [projectName, setProjectName] = useState('shoot_day_01');
   const [mediaRoot, setMediaRoot] = useState('');
-  const [trackLayout, setTrackLayout] = useState<TrackLayout>('per-clip');
+  const [trackLayout, setTrackLayout] = useState<TrackLayout>('per-device');
   const [rate, setRate] = useState<FrameRate | null>(null);
   const [timings, setTimings] = useState<{ ingestSeconds?: number; solveSeconds?: number }>({});
   const [report, setReport] = useState<string | null>(null);
@@ -726,16 +726,22 @@ export function App() {
                   value={trackLayout}
                   onChange={(e) => setTrackLayout(e.target.value as TrackLayout)}
                 >
-                  <option value="per-clip">One track per clip — nothing can hide</option>
-                  <option value="per-device">One track per camera — compact, multicam-ready</option>
+                  <option value="per-device">One track per camera — matches the timeline above</option>
+                  <option value="per-clip">One track per clip — tall, but nothing can hide</option>
                 </select>
               </div>
               <p className="help" style={{ marginTop: 10, maxWidth: '72ch' }}>
-                A track holds one clip at a time, so two clips on one track means the later one can
-                sit behind the earlier. <em>One track per clip</em> gives every file a track of its
-                own — thirty files, thirty video tracks — which makes for a tall timeline and
-                guarantees you can see everything that came in. <em>One track per camera</em> is the
-                classic layout: angles stacked, ready to cut between.
+                <em>One track per camera</em> lays the sequence out the way the timeline above
+                shows it: your supplied audio on A1, then each camera on its own video track, up to
+                four of them, with camera audio filling up to ten audio tracks. A stereo camera
+                takes two of those, because FCP7 XML has no way to put a stereo clip on one track.
+                Cameras past the budget share a track with one they never overlap; if a clip would
+                end up hidden behind another, it gets its own track anyway.
+              </p>
+              <p className="help" style={{ marginTop: 6, maxWidth: '72ch' }}>
+                <em>One track per clip</em> gives every file a track of its own — thirty files,
+                thirty video tracks. Unreadable as an edit, but useful when you suspect the solve
+                and want to see every clip laid out separately.
               </p>
               <p className="help" style={{ marginTop: 10, maxWidth: '72ch' }}>
                 A browser is never told where a file lives on disk — that is a privacy rule of the
