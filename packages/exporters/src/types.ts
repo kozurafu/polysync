@@ -6,8 +6,15 @@ export interface TimelineClip {
   name: string;
   /** Absolute path on the user's machine, for the NLE to relink against. */
   path: string;
-  /** Track/device this clip belongs to. One NLE track per distinct value. */
+  /**
+   * Track this clip belongs to. One NLE track per distinct value.
+   *
+   * Not necessarily the device: under a one-track-per-clip layout every clip
+   * gets its own value, so `trackLabel` carries the device for display.
+   */
   trackId: string;
+  /** What to call the track. Defaults to `trackId`. */
+  trackLabel?: string;
   /** Position on the project timeline, seconds. */
   startSeconds: number;
   /** Clip duration, seconds. */

@@ -162,6 +162,54 @@ async function checkPicking(page: import('playwright').Page, files: string[]): P
   return ok;
 }
 
+/**
+ * The XML the user actually feeds Premiere, taken from the real download.
+ *
+ * Two things have gone wrong here in real use and neither shows up anywhere
+ * else: every clip stacked onto a single track, where a later one can hide
+ * behind an earlier one; and `<pathurl>` carrying a bare filename, which makes
+ * every clip import offline with no way for Premiere to chain-relink them.
+ */
+async function checkXmlExport(page: import('playwright').Page, clipCount: number): Promise<boolean> {
+  let ok = true;
+
+  const download = page.waitForEvent('download', { timeout: 30_000 });
+  await page.click('button:has-text("FCP7 XML")');
+  const stream = await (await download).createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(chunk as Buffer);
+  const xml = Buffer.concat(chunks).toString('utf8');
+
+  const tracks = (xml.match(/<track>/g) ?? []).length;
+  const comments = [...xml.matchAll(/<!-- (.*?) -->/g)].map((m) => m[1]);
+  console.log(`\nExported XML: ${tracks} tracks for ${clipCount} clips`);
+  for (const comment of comments) console.log(`  ${comment}`);
+
+  // The default layout is one track per clip, so no two clips may share one.
+  const perTrack = new Map<string, number>();
+  for (const comment of comments) {
+    const track = comment.replace(/ ch\d+$/, '');
+    perTrack.set(track, (perTrack.get(track) ?? 0) + 1);
+  }
+  if (perTrack.size < clipCount) {
+    console.error(
+      `FAIL: ${clipCount} clips share only ${perTrack.size} tracks — clips can hide each other`,
+    );
+    ok = false;
+  }
+
+  const paths = [...xml.matchAll(/<pathurl>(.*?)<\/pathurl>/g)].map((m) => m[1]);
+  const bare = paths.filter((p) => !p.replace('file://', '').replace(/^\//, '').includes('/'));
+  if (bare.length) {
+    console.error(`FAIL: ${bare.length} clip(s) exported with no folder, e.g. ${bare[0]}`);
+    console.error('      Premiere would import these offline and relink them one at a time.');
+    ok = false;
+  } else {
+    console.log(`Every pathurl carries a folder, e.g. ${paths[0]}`);
+  }
+  return ok;
+}
+
 async function main(): Promise<void> {
   const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
   const root = resolve(positional[0] ?? './sample-shoot');
@@ -269,6 +317,8 @@ async function main(): Promise<void> {
       console.error('FAIL: diagnostic report did not generate');
       failed = true;
     }
+
+    if (!(await checkXmlExport(page, rows.length))) failed = true;
 
     await page.screenshot({ path: 'apps/web/smoke.png', fullPage: true });
     console.log('  Screenshot: apps/web/smoke.png');

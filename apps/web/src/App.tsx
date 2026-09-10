@@ -21,7 +21,12 @@ import {
   pickedIdentity,
   type PickResult,
 } from './lib/files.ts';
-import { FRAME_RATES, exportFiles, guessFrameRate } from './lib/exportProject.ts';
+import {
+  FRAME_RATES,
+  exportFiles,
+  guessFrameRate,
+  type TrackLayout,
+} from './lib/exportProject.ts';
 import { buildDiagnosticReport, probeEnvironment } from './lib/diagnostics.ts';
 import { Timeline, formatClock } from './components/Timeline.tsx';
 
@@ -39,6 +44,7 @@ export function App() {
   const [dragOver, setDragOver] = useState(false);
   const [projectName, setProjectName] = useState('shoot_day_01');
   const [mediaRoot, setMediaRoot] = useState('');
+  const [trackLayout, setTrackLayout] = useState<TrackLayout>('per-clip');
   const [rate, setRate] = useState<FrameRate | null>(null);
   const [timings, setTimings] = useState<{ ingestSeconds?: number; solveSeconds?: number }>({});
   const [report, setReport] = useState<string | null>(null);
@@ -207,16 +213,23 @@ export function App() {
     };
   }, []);
 
+  // True when no clip carries a folder — the shape a pick of individual files
+  // produces, and the one Premiere cannot chain-relink from.
+  const pathsAreBare = useMemo(
+    () => clips.length > 0 && clips.every((c) => !c.relativePath.includes('/')),
+    [clips],
+  );
+
   const doExport = useCallback(
     (format: 'fcp7' | 'edl') => {
       if (!result || !rate) return;
       const files = exportFiles(
-        { projectName, clips, result, deviceOf, mediaRoot, rate },
+        { projectName, clips, result, deviceOf, mediaRoot, rate, trackLayout },
         format,
       );
       for (const file of files) downloadText(file.filename, file.content);
     },
-    [result, rate, projectName, clips, deviceOf, mediaRoot],
+    [result, rate, projectName, clips, deviceOf, mediaRoot, trackLayout],
   );
 
   const makeReport = useCallback(async () => {
@@ -673,12 +686,44 @@ export function App() {
                   />
                 </div>
               </div>
+              <div className="field" style={{ marginTop: 12 }}>
+                <label htmlFor="track-layout">Timeline layout</label>
+                <select
+                  id="track-layout"
+                  value={trackLayout}
+                  onChange={(e) => setTrackLayout(e.target.value as TrackLayout)}
+                >
+                  <option value="per-clip">One track per clip — nothing can hide</option>
+                  <option value="per-device">One track per camera — compact, multicam-ready</option>
+                </select>
+              </div>
+              <p className="help" style={{ marginTop: 10, maxWidth: '72ch' }}>
+                A track holds one clip at a time, so two clips on one track means the later one can
+                sit behind the earlier. <em>One track per clip</em> gives every file a track of its
+                own — thirty files, thirty video tracks — which makes for a tall timeline and
+                guarantees you can see everything that came in. <em>One track per camera</em> is the
+                classic layout: angles stacked, ready to cut between.
+              </p>
               <p className="help" style={{ marginTop: 10, maxWidth: '72ch' }}>
                 A browser is never told where a file lives on disk — that is a privacy rule of the
-                platform, not something we can work around. FCP7 XML relinks by absolute path, so
-                paste the folder you picked and it gets joined to each clip's relative path. Leave
-                it blank and the NLE will ask you to relink once, which also works.
+                platform, not something we can work around. FCP7 XML relinks by path, so paste the
+                folder you picked and it gets joined to each clip's relative path.
               </p>
+              {!mediaRoot && (
+                <div className="note warn" style={{ marginTop: 10 }}>
+                  <p style={{ margin: 0 }}>
+                    {pathsAreBare
+                      ? `Every clip will be written as a bare filename, because these files were ` +
+                        `picked individually and a browser only learns a file's folder when you ` +
+                        `pick the folder itself. Premiere will show all ${clips.length} as offline ` +
+                        `and relink them one at a time. Fill in the folder above, or re-add the ` +
+                        `media as a folder, and it can relink the lot in one go.`
+                      : `Without the folder above, Premiere will show the clips as offline. ` +
+                        `Because they keep their subfolder structure it should relink all of them ` +
+                        `once you point it at the first one.`}
+                  </p>
+                </div>
+              )}
               <div className="export-row" style={{ marginTop: 14 }}>
                 <button className="primary" onClick={() => doExport('fcp7')}>
                   FCP7 XML — Premiere, Resolve

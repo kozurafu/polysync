@@ -197,3 +197,59 @@ describe('sanitiseReel', () => {
     expect(sanitiseReel('!!!', new Set())).toBe('REEL');
   });
 });
+
+describe('track layout', () => {
+  it('numbers tracks from the start of the sequence, not alphabetically', () => {
+    // V1 should be the track that opens the sequence. Sorting track ids by name
+    // put whichever device happened to sort first on V1, which for a project
+    // whose recorder is called REC and whose cameras are CAM_* meant the
+    // cameras came first and the sound sat under them.
+    const xml = exportFcp7Xml(project);
+    const order = [...xml.matchAll(/<!-- ([^-]+?) -->/g)].map((m) => m[1].trim());
+    expect(order[0]).toBe('CAM_A');
+  });
+
+  it('keeps two clips of the same name on separate tracks', () => {
+    // Two cards, both writing C0001.MP4. Under a one-track-per-clip layout
+    // these must not land on the same track — that is the entire point of the
+    // layout — so the track key has to be the clip id and not its name.
+    const collide: TimelineProject = {
+      name: 'Two cards',
+      rate: RATE_25,
+      clips: [
+        {
+          id: 'a-C0001',
+          name: 'C0001.MP4',
+          path: '/x/A/C0001.MP4',
+          trackId: 'a-C0001',
+          trackLabel: 'C0001.MP4 (FOOTAGE-A)',
+          startSeconds: 0,
+          durationSeconds: 10,
+          hasVideo: true,
+          hasAudio: false,
+          synced: true,
+        },
+        {
+          id: 'b-C0001',
+          name: 'C0001.MP4',
+          path: '/x/B/C0001.MP4',
+          trackId: 'b-C0001',
+          trackLabel: 'C0001.MP4 (FOOTAGE-B)',
+          startSeconds: 3,
+          durationSeconds: 10,
+          hasVideo: true,
+          hasAudio: false,
+          synced: true,
+        },
+      ],
+    };
+    const xml = exportFcp7Xml(collide);
+    // Neither clip has audio, so every track in the document is a video track.
+    expect(xml.match(/<track>/g)).toHaveLength(2);
+    expect(xml).toContain('C0001.MP4 (FOOTAGE-A)');
+    expect(xml).toContain('C0001.MP4 (FOOTAGE-B)');
+    // Both clipitems must survive with distinct ids, or one clip vanishes.
+    expect(xml).toContain('clipitem-a-C0001-video');
+    expect(xml).toContain('clipitem-b-C0001-video');
+  });
+});

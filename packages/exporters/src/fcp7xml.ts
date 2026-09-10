@@ -154,9 +154,36 @@ function clipItemXml(
   return lines.join('\n');
 }
 
-/** Stable, sorted list of track ids. */
+/**
+ * The tracks to emit, in the order the NLE will number them.
+ *
+ * Earliest clip first, so V1 is the track that starts the sequence rather than
+ * whichever track happens to sort first alphabetically. Ties break on the name,
+ * so the output is deterministic either way.
+ */
 function trackIds(clips: TimelineClip[]): string[] {
-  return [...new Set(clips.map((c) => c.trackId))].sort();
+  const firstStart = new Map<string, number>();
+  for (const clip of clips) {
+    const seen = firstStart.get(clip.trackId);
+    if (seen === undefined || clip.startSeconds < seen) {
+      firstStart.set(clip.trackId, clip.startSeconds);
+    }
+  }
+  return [...firstStart.keys()].sort((a, b) => {
+    const byStart = (firstStart.get(a) ?? 0) - (firstStart.get(b) ?? 0);
+    return byStart !== 0 ? byStart : a.localeCompare(b);
+  });
+}
+
+/**
+ * What to write in the track's comment.
+ *
+ * `trackLabel` when the caller supplied one, because under a per-clip layout
+ * the track id is a unique key rather than anything worth reading — repeating
+ * it alongside the label just makes the comment twice as long and no clearer.
+ */
+function trackLabel(clips: TimelineClip[], trackId: string): string {
+  return clips.find((c) => c.trackId === trackId)?.trackLabel || trackId;
 }
 
 export function exportFcp7Xml(
@@ -188,7 +215,7 @@ export function exportFcp7Xml(
   lines.push(`      <video>`);
   for (const trackId of videoTracks) {
     lines.push(`        <track>`);
-    lines.push(`          <!-- ${escapeXml(trackId)} -->`);
+    lines.push(`          <!-- ${escapeXml(trackLabel(project.clips, trackId))} -->`);
     for (const clip of project.clips.filter((c) => c.trackId === trackId && c.hasVideo)) {
       lines.push(clipItemXml(clip, project, 'video', seenFiles, opts));
     }
@@ -213,7 +240,7 @@ export function exportFcp7Xml(
     const channels = Math.max(1, ...clipsOnTrack.map((c) => c.audioChannels ?? 2));
     for (let channel = 1; channel <= channels; channel++) {
       lines.push(`        <track>`);
-      lines.push(`          <!-- ${escapeXml(trackId)} ch${channel} -->`);
+      lines.push(`          <!-- ${escapeXml(trackLabel(project.clips, trackId))} ch${channel} -->`);
       for (const clip of clipsOnTrack) {
         // A mono source has nothing on channel 2; asking for it makes Premiere
         // drop the whole clipitem.

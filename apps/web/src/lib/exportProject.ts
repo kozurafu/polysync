@@ -34,7 +34,24 @@ export interface ExportInput {
   /** Absolute folder the media was picked from, e.g. `D:\Rushes\Day1`. */
   mediaRoot: string;
   rate: FrameRate;
+  /** How clips are laid onto NLE tracks. Defaults to `per-clip`. */
+  trackLayout?: TrackLayout;
 }
+
+/**
+ * How solved clips are distributed across NLE tracks.
+ *
+ * `per-device` is what PluralEyes did: one track per camera, angles stacked,
+ * ready to cut between. It is the compact answer and the right one for a
+ * conventional multicam edit.
+ *
+ * `per-clip` gives every source file a track of its own — 33 files, 33 video
+ * tracks. It is the default because a track holds one clip at a time, so
+ * anything sharing a track can hide behind whatever the solve put next to it,
+ * and a clip you cannot see is indistinguishable from one that failed to
+ * import. It costs a tall timeline and guarantees you can see everything.
+ */
+export type TrackLayout = 'per-clip' | 'per-device';
 
 /** Common frame rates, as an editor names them. */
 export const FRAME_RATES: Array<{ label: string; rate: FrameRate }> = [
@@ -85,16 +102,34 @@ export function joinMediaRoot(root: string, relativePath: string): string {
   return `${trimmed}${separator}${relativePath.split('/').join(separator)}`;
 }
 
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
 export function buildTimeline(input: ExportInput): TimelineProject {
   const byId = new Map(input.clips.map((c) => [c.id, c]));
+  const layout = input.trackLayout ?? 'per-clip';
+  // Keyed on the clip id, not its name: two cards routinely hold files of the
+  // same name (`A/C0001.MP4` and `B/C0001.MP4`), and two clips sharing a track
+  // is the one thing this layout exists to prevent. The readable name goes in
+  // the label instead.
+  const trackName = (clipId: string) => (layout === 'per-clip' ? clipId : input.deviceOf(clipId));
+
   const clips: TimelineClip[] = input.result.placements.map((placement) => {
     const clip = byId.get(placement.clipId);
     const device = input.deviceOf(placement.clipId);
+    // The basename, not the path. In the browser a clip's `name` is its path
+    // relative to the picked folder — that is what makes `pathurl` work — but
+    // it is also what Premiere shows in the project panel, and `Footage/C1/
+    // C1_4676.MP4` is not what anyone calls a clip.
+    const name = basename(clip?.name ?? placement.clipId);
     return {
       id: placement.clipId,
-      name: clip?.name ?? placement.clipId,
+      name,
       path: joinMediaRoot(input.mediaRoot, clip?.relativePath ?? placement.clipId),
-      trackId: device,
+      trackId: trackName(placement.clipId),
+      trackLabel: layout === 'per-clip' ? `${name} (${device})` : device,
       startSeconds: placement.startSeconds,
       durationSeconds: clip?.durationSeconds ?? 0,
       sourceInSeconds: 0,
