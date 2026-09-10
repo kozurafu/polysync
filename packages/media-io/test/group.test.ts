@@ -98,6 +98,44 @@ describe('groupClips', () => {
     expect(result.deviceIds).toEqual(['CAM_A', 'REC']);
   });
 
+  it('does not lose a whole strategy to one file it cannot name', () => {
+    // Reported 2026-09-10, from a real project picked as loose files. The
+    // prefix rule reads every camera file here correctly — C1, C2 and the Sony
+    // C000n pair — but the four recorder files begin with a digit and it can
+    // name none of them. Requiring a strategy to name *every* file threw the
+    // whole thing away over those four, fell through to extension class, and
+    // put three cameras on one device called VIDEO. A device cannot match
+    // itself, so that silently cancelled every camera-to-camera comparison in
+    // the project.
+    const names = [
+      '01 260821_140448_Tr1_p1-esv2-speech-50p.mp3',
+      '02 260821_140448_Tr1_p2-esv2-speech-50p.mp3',
+      'C0005.MP4',
+      'C0006.MP4',
+      'C1_4677.MP4',
+      'C2_4737.MP4',
+      'C2_4738.MP4',
+    ];
+    const result = groupClips(
+      names.map((path, i) => ({ id: `c${i}`, path, hasVideo: /mp4$/i.test(path) })),
+    );
+    expect(deviceOf(result, 'c0')).toBe('AUDIO');
+    expect(deviceOf(result, 'c2')).toBe('C');
+    expect(deviceOf(result, 'c4')).toBe('C1');
+    expect(deviceOf(result, 'c5')).toBe('C2');
+    // The three cameras must be three devices, or none of them is ever
+    // compared with another.
+    expect(new Set(result.assignments.map((a) => a.deviceId)).size).toBe(4);
+  });
+
+  it('still falls back to extension class when no filename says anything', () => {
+    const result = groupClips(
+      inputs('a.mov', 'b.mov', 'x.wav'),
+    );
+    expect(result.basis).toBe('extension-class');
+    expect(result.deviceIds).toEqual(['VIDEO', 'AUDIO']);
+  });
+
   it('recognises XDCAM BPAV and P2 Contents layouts', () => {
     const xdcam = groupClips(
       inputs('CardOne/BPAV/CLPR/CLIP0001/CLIP0001.MP4', 'CardTwo/BPAV/CLPR/CLIP0001/CLIP0001.MP4'),

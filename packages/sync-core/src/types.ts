@@ -78,13 +78,36 @@ export interface SyncStats {
   aligned: number;
 }
 
+export type InconsistencyKind = 'offset-disagreement' | 'same-device-overlap';
+
+export interface Inconsistency {
+  aId: string;
+  bId: string;
+  errorSeconds: number;
+  kind: InconsistencyKind;
+}
+
 export interface SyncResult {
   placements: Placement[];
   pairs: PairAlignment[];
   /** Clips that could not be matched to anything. */
   unsyncedClipIds: string[];
-  /** Edges whose implied offset disagrees with the solved timeline. */
-  inconsistencies: Array<{ aId: string; bId: string; errorSeconds: number }>;
+  /**
+   * Places where the solved timeline contradicts itself.
+   *
+   * Two quite different failures, and `kind` says which — a report that runs
+   * them together sends you looking for the wrong cause:
+   *
+   *   `offset-disagreement` — two clips matched each other at one offset, and
+   *   the timeline put them at another. One of the two measurements is wrong,
+   *   and the audio decides which. Check by ear.
+   *
+   *   `same-device-overlap` — two clips from one device ended up overlapping
+   *   in time. No measurement can make that true, because a camera records one
+   *   clip at a time; it means a placement is wrong, or two real devices have
+   *   been grouped as one.
+   */
+  inconsistencies: Inconsistency[];
   groupCount: number;
   stats: SyncStats;
 }

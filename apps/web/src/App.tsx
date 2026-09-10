@@ -220,6 +220,21 @@ export function App() {
     [clips],
   );
 
+  const clipName = useCallback(
+    (id: string) => clips.find((c) => c.id === id)?.name ?? id,
+    [clips],
+  );
+  // Two different failures, shown separately: one says a measurement is
+  // doubtful, the other says the grouping or a placement is impossible.
+  const sameDeviceOverlaps = useMemo(
+    () => result?.inconsistencies.filter((i) => i.kind === 'same-device-overlap') ?? [],
+    [result],
+  );
+  const offsetDisagreements = useMemo(
+    () => result?.inconsistencies.filter((i) => i.kind === 'offset-disagreement') ?? [],
+    [result],
+  );
+
   const doExport = useCallback(
     (format: 'fcp7' | 'edl') => {
       if (!result || !rate) return;
@@ -528,7 +543,26 @@ export function App() {
           </div>
         )}
 
-        {result && result.inconsistencies.length > 0 && (
+        {sameDeviceOverlaps.length > 0 && (
+          <div className="note bad">
+            <h3>Clips from one device placed on top of each other</h3>
+            <p style={{ margin: '0 0 6px' }}>
+              A device records one clip at a time, so no audio can make these true. Either a
+              placement is wrong, or two real devices have been grouped as one — check the device
+              column below.
+            </p>
+            <ul>
+              {sameDeviceOverlaps.map((bad) => (
+                <li key={`${bad.aId}~${bad.bId}`}>
+                  {clipName(bad.aId)} and {clipName(bad.bId)} — overlap by{' '}
+                  {(bad.errorSeconds * 1000).toFixed(0)} ms
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {offsetDisagreements.length > 0 && (
           <div className="note bad">
             <h3>Matches that disagree</h3>
             <p style={{ margin: '0 0 6px' }}>
@@ -536,10 +570,9 @@ export function App() {
               puts them. At least one of the two is wrong — check these by ear before cutting.
             </p>
             <ul>
-              {result.inconsistencies.map((bad) => (
+              {offsetDisagreements.map((bad) => (
                 <li key={`${bad.aId}~${bad.bId}`}>
-                  {clips.find((c) => c.id === bad.aId)?.name ?? bad.aId} vs{' '}
-                  {clips.find((c) => c.id === bad.bId)?.name ?? bad.bId} — off by{' '}
+                  {clipName(bad.aId)} vs {clipName(bad.bId)} — off by{' '}
                   {(bad.errorSeconds * 1000).toFixed(0)} ms
                 </li>
               ))}

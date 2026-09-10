@@ -130,7 +130,20 @@ describe('buildDiagnosticReport', () => {
         },
       ],
       unsyncedClipIds: ['C2_4929'],
-      inconsistencies: [{ aId: 'C2_4928', bId: 'C2_4929', errorSeconds: 0.043 }],
+      inconsistencies: [
+        {
+          aId: 'C2_4928',
+          bId: 'C2_4929',
+          errorSeconds: 0.043,
+          kind: 'offset-disagreement' as const,
+        },
+        {
+          aId: 'C2_4928',
+          bId: 'C2_4929',
+          errorSeconds: 1.5,
+          kind: 'same-device-overlap' as const,
+        },
+      ],
       groupCount: 2,
       stats: {
         totalPairs: 1,
@@ -166,6 +179,18 @@ describe('buildDiagnosticReport', () => {
       };
       const report = buildDiagnosticReport(input({ result: gatedOut }));
       expect(report).toContain('every one was ruled out by a gate');
+    });
+
+    it('keeps impossible overlaps apart from doubtful offsets', () => {
+      // They mean different things: an overlap says the grouping or a placement
+      // is impossible, a disagreement says one of two measurements is wrong.
+      // Running them into one list sends you after the wrong cause — it briefly
+      // sent me after the wrong cause reading a real report.
+      const report = buildDiagnosticReport(input({ result }));
+      expect(report).toContain('CLIPS FROM ONE DEVICE PLACED ON TOP OF EACH OTHER (1)');
+      expect(report).toContain('MATCHES THAT DISAGREE (1)');
+      expect(report).toContain('overlap by 1500 ms');
+      expect(report).toContain('off by 43 ms');
     });
 
     it('lists matches that disagree', () => {

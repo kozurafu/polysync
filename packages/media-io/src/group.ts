@@ -90,6 +90,12 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
     { basis: 'extension-class', keys: perFile(extensionClass) },
   ];
 
+  // Every strategy's answer, computed once. Extension class is held back from
+  // the whole-project pass below: it can always name every file, so letting it
+  // win there would stop the search before anything more specific was tried.
+  const answers = strategies.map(({ basis, keys }) => ({ basis, keys: keys() }));
+  const specific = answers.filter((a) => a.basis !== 'extension-class');
+
   // The first strategy that manages to name every file, kept aside in case no
   // strategy manages to split them. A folder of one camera's rushes really is
   // one device, and calling it `C2` because that is what the files are called
@@ -97,8 +103,7 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
   // VIDEO.
   let fallback: { basis: GroupBasis; keys: string[] } | undefined;
 
-  for (const { basis, keys: compute } of strategies) {
-    const keys = compute();
+  for (const { basis, keys } of specific) {
     if (keys.some((k) => k === undefined)) continue;
     const named = keys as string[];
     if (!fallback) fallback = { basis, keys: named };
@@ -110,7 +115,42 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
     return finish(inputs, named, basis, warnings);
   }
 
+  // Nothing named the whole project on its own, so let each file take the most
+  // specific name any strategy can give it.
+  //
+  // The alternative — a strategy must name every file or be discarded — throws
+  // away a correct answer over one odd filename, and did. A project of 33
+  // camera files (`C1_4677.MP4`, `C2_4737.MP4`, `C0005.MP4`, which the prefix
+  // rule reads perfectly) plus four recorder files named `01 260821_....mp3`
+  // lost the entire prefix strategy to those four leading digits, fell through
+  // to extension class, and put three cameras on one device called VIDEO.
+  // Since a device cannot match itself, that silently cancelled all 528
+  // camera-to-camera comparisons — every pair most likely to sync.
+  const composed = inputs.map((_, i) => {
+    for (const { basis, keys } of answers) {
+      const key = keys[i];
+      if (key !== undefined) return { key, basis };
+    }
+    return undefined;
+  });
+  if (composed.every((c) => c !== undefined)) {
+    const named = composed.map((c) => c!.key);
+    if (new Set(named).size >= 2) {
+      // Report the basis that named the most files, since that is the one a
+      // user would recognise as having done the work.
+      const tally = new Map<GroupBasis, number>();
+      for (const c of composed) tally.set(c!.basis, (tally.get(c!.basis) ?? 0) + 1);
+      const basis = [...tally.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      return finish(inputs, named, basis, warnings);
+    }
+  }
+
   if (fallback) return finish(inputs, fallback.keys, fallback.basis, warnings);
+
+  const extension = answers[answers.length - 1].keys;
+  if (extension.every((k) => k !== undefined)) {
+    return finish(inputs, extension as string[], 'extension-class', warnings);
+  }
 
   const only = inputs.length === 1 ? deviceNameFor(inputs[0]) : 'DEVICE_1';
   return finish(inputs, inputs.map(() => only), 'extension-class', warnings);

@@ -246,11 +246,38 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     }
 
     if (result.inconsistencies.length) {
-      heading(`MATCHES THAT DISAGREE (${result.inconsistencies.length})`);
-      for (const bad of result.inconsistencies.slice(0, MAX_NEAR_MISSES)) {
-        const a = input.clips.find((c) => c.id === bad.aId)?.relativePath ?? bad.aId;
-        const b = input.clips.find((c) => c.id === bad.bId)?.relativePath ?? bad.bId;
-        line(`  ${a}  vs  ${b}   off by ${(bad.errorSeconds * 1000).toFixed(0)} ms`);
+      const name = (id: string) =>
+        input.clips.find((c) => c.id === id)?.relativePath ?? id;
+      const overlaps = result.inconsistencies.filter((i) => i.kind === 'same-device-overlap');
+      const disagreements = result.inconsistencies.filter(
+        (i) => i.kind === 'offset-disagreement',
+      );
+
+      // Split, because the two mean different things and running them together
+      // sends you hunting for the wrong cause.
+      if (overlaps.length) {
+        heading(`CLIPS FROM ONE DEVICE PLACED ON TOP OF EACH OTHER (${overlaps.length})`);
+        line('  A device records one clip at a time, so no audio can make these true.');
+        line('  Either a placement is wrong, or two real devices are grouped as one.');
+        line('');
+        for (const bad of overlaps.slice(0, MAX_NEAR_MISSES)) {
+          line(
+            `  ${name(bad.aId)}  and  ${name(bad.bId)}   overlap by ` +
+              `${(bad.errorSeconds * 1000).toFixed(0)} ms`,
+          );
+        }
+      }
+      if (disagreements.length) {
+        heading(`MATCHES THAT DISAGREE (${disagreements.length})`);
+        line('  These two clips matched each other at one offset and the timeline put');
+        line('  them at another. One of the two is wrong — check them by ear.');
+        line('');
+        for (const bad of disagreements.slice(0, MAX_NEAR_MISSES)) {
+          line(
+            `  ${name(bad.aId)}  vs  ${name(bad.bId)}   off by ` +
+              `${(bad.errorSeconds * 1000).toFixed(0)} ms`,
+          );
+        }
       }
     }
   }

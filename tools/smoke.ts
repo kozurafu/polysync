@@ -170,7 +170,12 @@ async function checkPicking(page: import('playwright').Page, files: string[]): P
  * behind an earlier one; and `<pathurl>` carrying a bare filename, which makes
  * every clip import offline with no way for Premiere to chain-relink them.
  */
-async function checkXmlExport(page: import('playwright').Page, clipCount: number): Promise<boolean> {
+async function checkXmlExport(
+  page: import('playwright').Page,
+  clipCount: number,
+  files: string[],
+  root: string,
+): Promise<boolean> {
   let ok = true;
 
   const download = page.waitForEvent('download', { timeout: 30_000 });
@@ -198,14 +203,43 @@ async function checkXmlExport(page: import('playwright').Page, clipCount: number
     ok = false;
   }
 
+  // The sequence must declare its own frame size, or the NLE invents sequence
+  // settings and the footage arrives the wrong shape. Only meaningful when
+  // there is picture: an audio-only project has no frame size to declare.
+  const hasVideo = xml.includes('<mediatype>video</mediatype>');
+  if (hasVideo) {
+    const size = /<width>(\d+)<\/width>[\s\S]*?<height>(\d+)<\/height>/.exec(
+      xml.split('<format>')[1]?.split('</format>')[0] ?? '',
+    );
+    if (!size) {
+      console.error('FAIL: the sequence declares no frame size — the NLE will guess it');
+      ok = false;
+    } else {
+      console.log(`Sequence format: ${size[1]}x${size[2]}`);
+    }
+    if (!xml.includes('<pixelaspectratio>')) {
+      console.error('FAIL: no pixel aspect ratio — the importer may reshape the picture');
+      ok = false;
+    }
+  } else {
+    console.log('Audio-only project: no frame size to declare');
+  }
+
+  // Paths must survive whatever the picker knew. Files picked loose genuinely
+  // have no folder, and inventing one would be worse than saying so — the app
+  // warns about that case rather than the export lying about it. What must not
+  // happen is a folder the picker *did* know being dropped on the way out.
   const paths = [...xml.matchAll(/<pathurl>(.*?)<\/pathurl>/g)].map((m) => m[1]);
+  const nested = files.some((f) => f.slice(root.length + 1).includes('/'));
   const bare = paths.filter((p) => !p.replace('file://', '').replace(/^\//, '').includes('/'));
-  if (bare.length) {
-    console.error(`FAIL: ${bare.length} clip(s) exported with no folder, e.g. ${bare[0]}`);
+  if (nested && bare.length) {
+    console.error(`FAIL: ${bare.length} clip(s) lost their folder, e.g. ${bare[0]}`);
     console.error('      Premiere would import these offline and relink them one at a time.');
     ok = false;
+  } else if (nested) {
+    console.log(`Every pathurl keeps its folder, e.g. ${paths[0]}`);
   } else {
-    console.log(`Every pathurl carries a folder, e.g. ${paths[0]}`);
+    console.log(`Flat pick, so paths are bare as expected, e.g. ${paths[0]}`);
   }
   return ok;
 }
@@ -318,7 +352,7 @@ async function main(): Promise<void> {
       failed = true;
     }
 
-    if (!(await checkXmlExport(page, rows.length))) failed = true;
+    if (!(await checkXmlExport(page, rows.length, files, root))) failed = true;
 
     await page.screenshot({ path: 'apps/web/smoke.png', fullPage: true });
     console.log('  Screenshot: apps/web/smoke.png');

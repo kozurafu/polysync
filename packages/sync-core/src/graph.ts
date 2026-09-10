@@ -7,7 +7,14 @@ import {
   recordingTimeMatrix,
   type GateOptions,
 } from './gates.js';
-import type { AudioClip, PairAlignment, Placement, SyncResult, SyncStats } from './types.js';
+import type {
+  AudioClip,
+  Inconsistency,
+  PairAlignment,
+  Placement,
+  SyncResult,
+  SyncStats,
+} from './types.js';
 
 export interface SyncOptions extends AlignOptions, GateOptions {
   /** Measure and report per-pair clock drift. Costs one extra pass per accepted edge. */
@@ -205,7 +212,7 @@ export function syncProject(
   // Consistency check: every accepted edge NOT in the tree is an independent
   // measurement of a distance the tree already fixed. Disagreement means at
   // least one of the two is wrong, and the user should be told which clips.
-  const inconsistencies: Array<{ aId: string; bId: string; errorSeconds: number }> = [];
+  const inconsistencies: Inconsistency[] = [];
   const treeSet = new Set(tree);
   for (const edge of accepted) {
     if (treeSet.has(edge)) continue;
@@ -215,7 +222,12 @@ export function syncProject(
     const implied = position[b]! - position[a]!;
     const error = implied - edge.offsetSeconds;
     if (Math.abs(error) > 0.02) {
-      inconsistencies.push({ aId: edge.aId, bId: edge.bId, errorSeconds: error });
+      inconsistencies.push({
+        aId: edge.aId,
+        bId: edge.bId,
+        errorSeconds: error,
+        kind: 'offset-disagreement',
+      });
     }
   }
 
@@ -313,6 +325,7 @@ export function syncProject(
             aId: clips[prev].id,
             bId: clips[cur].id,
             errorSeconds: overlap,
+            kind: 'same-device-overlap',
           });
         }
       }

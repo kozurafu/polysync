@@ -118,6 +118,10 @@ function clipItemXml(
       if (clip.width && clip.height) {
         lines.push(`                  <width>${clip.width}</width>`);
         lines.push(`                  <height>${clip.height}</height>`);
+        // Without these two the importer is free to assume anamorphic pixels
+        // or interlaced fields and reshape the picture accordingly.
+        lines.push(`                  <pixelaspectratio>square</pixelaspectratio>`);
+        lines.push(`                  <fielddominance>none</fielddominance>`);
       }
       lines.push(rateXml(rate, '                  '));
       lines.push(`                </samplecharacteristics>`);
@@ -186,6 +190,32 @@ function trackLabel(clips: TimelineClip[], trackId: string): string {
   return clips.find((c) => c.trackId === trackId)?.trackLabel || trackId;
 }
 
+/**
+ * The frame size the sequence should be built at.
+ *
+ * The most common size among the clips that have picture, breaking ties on the
+ * larger frame. Most common rather than largest, because a shoot is usually one
+ * format plus the odd outlier, and building the sequence around the outlier
+ * would scale every other clip; and larger on a tie, because scaling down loses
+ * less than scaling up.
+ */
+export function sequenceFrameSize(
+  clips: TimelineClip[],
+): { width: number; height: number } | undefined {
+  const tally = new Map<string, { width: number; height: number; count: number }>();
+  for (const clip of clips) {
+    if (!clip.hasVideo || !clip.width || !clip.height) continue;
+    const key = `${clip.width}x${clip.height}`;
+    const seen = tally.get(key);
+    if (seen) seen.count++;
+    else tally.set(key, { width: clip.width, height: clip.height, count: 1 });
+  }
+  const ranked = [...tally.values()].sort(
+    (a, b) => b.count - a.count || b.width * b.height - a.width * a.height,
+  );
+  return ranked[0] ? { width: ranked[0].width, height: ranked[0].height } : undefined;
+}
+
 export function exportFcp7Xml(
   project: TimelineProject,
   options: Partial<Fcp7Options> = {},
@@ -213,6 +243,22 @@ export function exportFcp7Xml(
   lines.push(`    <media>`);
 
   lines.push(`      <video>`);
+  // The sequence's own format. Its absence is why imported timelines came out
+  // the wrong shape: with no `<format>` the NLE has nothing to build sequence
+  // settings from and invents them, so 3840x2160 rushes landed in whatever
+  // Premiere guessed and were scaled to fit it.
+  const frame = sequenceFrameSize(project.clips);
+  if (frame) {
+    lines.push(`        <format>`);
+    lines.push(`          <samplecharacteristics>`);
+    lines.push(rateXml(rate, '            '));
+    lines.push(`            <width>${frame.width}</width>`);
+    lines.push(`            <height>${frame.height}</height>`);
+    lines.push(`            <pixelaspectratio>square</pixelaspectratio>`);
+    lines.push(`            <fielddominance>none</fielddominance>`);
+    lines.push(`          </samplecharacteristics>`);
+    lines.push(`        </format>`);
+  }
   for (const trackId of videoTracks) {
     lines.push(`        <track>`);
     lines.push(`          <!-- ${escapeXml(trackLabel(project.clips, trackId))} -->`);
@@ -235,6 +281,12 @@ export function exportFcp7Xml(
   // brings in half the audio at best and, on a track where clips overlap,
   // nothing at all.
   lines.push(`      <audio>`);
+  lines.push(`        <format>`);
+  lines.push(`          <samplecharacteristics>`);
+  lines.push(`            <depth>16</depth>`);
+  lines.push(`            <samplerate>48000</samplerate>`);
+  lines.push(`          </samplecharacteristics>`);
+  lines.push(`        </format>`);
   for (const trackId of audioTracks) {
     const clipsOnTrack = project.clips.filter((c) => c.trackId === trackId && c.hasAudio);
     const channels = Math.max(1, ...clipsOnTrack.map((c) => c.audioChannels ?? 2));

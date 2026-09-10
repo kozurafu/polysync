@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { RATE_25, RATE_2997_DF, framesToTimecode, timecodeToFrames } from '@polysync/timecode';
-import { exportEdl, exportFcp7Xml, pathToFileUrl, sanitiseReel } from '../src/index.js';
+import {
+  exportEdl,
+  exportFcp7Xml,
+  pathToFileUrl,
+  sanitiseReel,
+  sequenceFrameSize,
+} from '../src/index.js';
 import type { TimelineProject } from '../src/index.js';
 
 const project: TimelineProject = {
@@ -251,5 +257,64 @@ describe('track layout', () => {
     // Both clipitems must survive with distinct ids, or one clip vanishes.
     expect(xml).toContain('clipitem-a-C0001-video');
     expect(xml).toContain('clipitem-b-C0001-video');
+  });
+});
+
+
+describe('sequence format', () => {
+  // Reported 2026-09-10: the imported timeline did not keep the footage's
+  // aspect ratio. The exported XML had no <format> block at all, so the NLE
+  // had nothing to build sequence settings from and invented them — 3840x2160
+  // rushes then got scaled into whatever Premiere guessed.
+  it('declares the sequence frame size', () => {
+    const xml = exportFcp7Xml(project);
+    const format = xml.split('<format>')[1].split('</format>')[0];
+    expect(format).toContain('<width>3840</width>');
+    expect(format).toContain('<height>2160</height>');
+  });
+
+  it('declares square pixels and progressive fields', () => {
+    // Absent these, an importer is free to assume anamorphic pixels or
+    // interlaced fields and reshape the picture to match.
+    const xml = exportFcp7Xml(project);
+    expect(xml).toContain('<pixelaspectratio>square</pixelaspectratio>');
+    expect(xml).toContain('<fielddominance>none</fielddominance>');
+  });
+
+  it('picks the commonest frame size, not the first or the biggest', () => {
+    const clips = [
+      { width: 1920, height: 1080 },
+      { width: 1920, height: 1080 },
+      { width: 3840, height: 2160 },
+    ].map((size, i) => ({
+      id: `c${i}`, name: `c${i}.mov`, path: `/x/c${i}.mov`, trackId: `c${i}`,
+      startSeconds: i, durationSeconds: 10, hasVideo: true, hasAudio: false,
+      synced: true, ...size,
+    }));
+    expect(sequenceFrameSize(clips)).toEqual({ width: 1920, height: 1080 });
+  });
+
+  it('breaks a tie towards the larger frame', () => {
+    const clips = [
+      { width: 1920, height: 1080 },
+      { width: 3840, height: 2160 },
+    ].map((size, i) => ({
+      id: `c${i}`, name: `c${i}.mov`, path: `/x/c${i}.mov`, trackId: `c${i}`,
+      startSeconds: i, durationSeconds: 10, hasVideo: true, hasAudio: false,
+      synced: true, ...size,
+    }));
+    expect(sequenceFrameSize(clips)).toEqual({ width: 3840, height: 2160 });
+  });
+
+  it('has no frame size to declare for an audio-only project', () => {
+    expect(
+      sequenceFrameSize([
+        {
+          id: 'a', name: 'a.wav', path: '/x/a.wav', trackId: 'a',
+          startSeconds: 0, durationSeconds: 10, hasVideo: false, hasAudio: true,
+          synced: true,
+        },
+      ]),
+    ).toBeUndefined();
   });
 });
