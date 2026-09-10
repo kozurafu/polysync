@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { groupClips, type GroupResult } from '@polysync/media-io';
 import type { SyncResult } from '@polysync/sync-core';
 import type { FrameRate } from '@polysync/timecode';
@@ -10,7 +10,17 @@ import {
   type IngestedClip,
   type PickedFile,
 } from './lib/engine.ts';
-import { downloadText, fromDrop, fromInput, hasDirectoryPicker, pickDirectory } from './lib/files.ts';
+import {
+  MEDIA_ACCEPT,
+  downloadText,
+  fromDrop,
+  fromInput,
+  hasDirectoryPicker,
+  mergePicked,
+  pickDirectory,
+  pickedIdentity,
+  type PickResult,
+} from './lib/files.ts';
 import { FRAME_RATES, exportFiles, guessFrameRate } from './lib/exportProject.ts';
 import { buildDiagnosticReport, probeEnvironment } from './lib/diagnostics.ts';
 import { Timeline, formatClock } from './components/Timeline.tsx';
@@ -33,7 +43,11 @@ export function App() {
   const [timings, setTimings] = useState<{ ingestSeconds?: number; solveSeconds?: number }>({});
   const [report, setReport] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [ignored, setIgnored] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  /** dragenter/dragleave fire for every child element, so count rather than toggle. */
+  const dragDepth = useRef(0);
 
   const grouping: GroupResult | null = useMemo(() => {
     if (clips.length === 0) return null;
@@ -63,41 +77,69 @@ export function App() {
     return [...seen].sort();
   }, [clips, deviceOf]);
 
-  const startIngest = useCallback(async (files: PickedFile[]) => {
-    if (files.length === 0) {
-      setError('No media files found in that folder.');
-      return;
-    }
-    setError(null);
-    setResult(null);
-    setPicked(files);
-    setPhase('ingesting');
-    setProgress({ fraction: 0, label: 'Reading files' });
-    setReport(null);
-    const started = performance.now();
-
-    try {
-      const { clips: ingested, failures: failed } = await ingestFiles(files, {
-        onProgress: (p) =>
-          setProgress({
-            fraction: p.fraction,
-            label: p.current ? `Decoding ${p.current}` : `Decoded ${p.done} of ${p.total}`,
-          }),
-      });
-      setTimings({ ingestSeconds: (performance.now() - started) / 1000 });
-      setClips(ingested);
-      setFailures(failed);
-      setOverrides({});
-      if (ingested.length > 0 && !rate) setRate(guessFrameRate(ingested));
-      setPhase('ready');
-      if (ingested.length === 0) {
-        setError('Nothing could be decoded. See the skipped files below for why.');
+  /**
+   * Take newly picked files and fold them into the project.
+   *
+   * Appends rather than replaces: dropping camera files and then recorder files
+   * is the commonest way to assemble a project, and the second drop used to
+   * throw the first away. Only files that are new or have changed since the
+   * last pass are decoded — re-reading four hours of audio to add one clip is
+   * twenty-four seconds nobody should pay twice.
+   */
+  const addMedia = useCallback(
+    async (incoming: PickResult) => {
+      setIgnored(incoming.ignored);
+      if (incoming.files.length === 0) {
+        setError(
+          incoming.ignored.length
+            ? `Nothing there Polysync can read. ${incoming.ignored.length} file(s) were not audio or video.`
+            : 'No media files found there.',
+        );
+        return;
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setPhase('idle');
-    }
-  }, [rate]);
+
+      const merged = mergePicked(picked, incoming.files);
+      const before = new Map(picked.map((f) => [f.relativePath, pickedIdentity(f)]));
+      const fresh = merged.filter((f) => before.get(f.relativePath) !== pickedIdentity(f));
+      const keep = clips.filter(
+        (c) => merged.some((f) => f.relativePath === c.id) && !fresh.some((f) => f.relativePath === c.id),
+      );
+
+      setError(null);
+      setResult(null);
+      setReport(null);
+      setPicked(merged);
+      setPhase('ingesting');
+      setProgress({ fraction: 0, label: 'Reading files' });
+      const started = performance.now();
+
+      try {
+        const { clips: ingested, failures: failed } = await ingestFiles(fresh, {
+          onProgress: (p) =>
+            setProgress({
+              fraction: p.fraction,
+              label: p.current ? `Decoding ${p.current}` : `Decoded ${p.done} of ${p.total}`,
+            }),
+        });
+        const all = [...keep, ...ingested].sort((a, b) => a.id.localeCompare(b.id));
+        setTimings({ ingestSeconds: (performance.now() - started) / 1000 });
+        setClips(all);
+        setFailures((previous) => [
+          ...previous.filter((f) => merged.some((m) => m.relativePath === f.relativePath)),
+          ...failed,
+        ]);
+        if (all.length > 0 && !rate) setRate(guessFrameRate(all));
+        setPhase('ready');
+        if (all.length === 0) {
+          setError('Nothing could be decoded. See the skipped files below for why.');
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setPhase(clips.length ? 'ready' : 'idle');
+      }
+    },
+    [picked, clips, rate],
+  );
 
   const runSync = useCallback(async () => {
     // Solving transfers the audio into the worker and detaches it here, so a
@@ -135,12 +177,35 @@ export function App() {
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
       event.preventDefault();
+      dragDepth.current = 0;
       setDragOver(false);
-      const files = await fromDrop(event.dataTransfer);
-      await startIngest(files);
+      await addMedia(await fromDrop(event.dataTransfer));
     },
-    [startIngest],
+    [addMedia],
   );
+
+  /**
+   * Stop the browser navigating to a dropped file.
+   *
+   * A drop that reaches the document is handled by the browser, which opens the
+   * file in a new tab — the page, and everything decoded into it, is gone. The
+   * app used to render a drop target only on the empty state, so the moment a
+   * project existed, dropping anything destroyed it. Reported as "it opened a
+   * new tab with a blank screen", which is exactly what a raw .mp4 in a tab
+   * looks like.
+   *
+   * Both events need preventing: without `dragover`, `drop` never fires on us
+   * at all.
+   */
+  useEffect(() => {
+    const swallow = (event: DragEvent) => event.preventDefault();
+    window.addEventListener('dragover', swallow);
+    window.addEventListener('drop', swallow);
+    return () => {
+      window.removeEventListener('dragover', swallow);
+      window.removeEventListener('drop', swallow);
+    };
+  }, []);
 
   const doExport = useCallback(
     (format: 'fcp7' | 'edl') => {
@@ -208,7 +273,25 @@ export function App() {
         : undefined;
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragEnter={(e) => {
+        if (!e.dataTransfer?.types.includes('Files')) return;
+        dragDepth.current += 1;
+        setDragOver(true);
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragOver(false);
+      }}
+      onDrop={(e) => void onDrop(e)}
+    >
+      {dragOver && (
+        <div className="drop-veil">
+          <div>Drop to add — files or folders</div>
+        </div>
+      )}
       <header className="topbar">
         <div className="brand">Poly<span>sync</span></div>
         <div className="privacy">LOCAL ONLY · NOTHING IS UPLOADED</div>
@@ -220,8 +303,13 @@ export function App() {
             </button>
           )}
           {clips.length > 0 && (
-            <button onClick={() => inputRef.current?.click()} disabled={busy}>
-              Add media
+            <button onClick={() => fileInputRef.current?.click()} disabled={busy}>
+              Add files
+            </button>
+          )}
+          {clips.length > 0 && (
+            <button onClick={() => folderInputRef.current?.click()} disabled={busy}>
+              Add folder
             </button>
           )}
           {clips.length > 0 && (
@@ -237,46 +325,65 @@ export function App() {
         </div>
       </header>
 
+      {/*
+        Two inputs, because one cannot do both jobs. `webkitdirectory` turns the
+        OS dialog into a folder-only picker, which greys out every individual
+        file — reported as "the files are greyed out". The fix is not a flag, it
+        is a second input.
+        The value is cleared on each change so picking the same folder twice in
+        a row still fires an event.
+      */}
       <input
-        ref={inputRef}
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept={MEDIA_ACCEPT}
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const result = fromInput(e.target.files);
+          e.target.value = '';
+          void addMedia(result);
+        }}
+      />
+      <input
+        ref={folderInputRef}
         type="file"
         multiple
         style={{ display: 'none' }}
-        // Non-standard attributes that make an <input> accept a folder.
         {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-        onChange={(e) => void startIngest(fromInput(e.target.files))}
+        onChange={(e) => {
+          const result = fromInput(e.target.files);
+          e.target.value = '';
+          void addMedia(result);
+        }}
       />
 
       <main>
         {clips.length === 0 && !busy && (
-          <div
-            className={`dropzone ${dragOver ? 'over' : ''}`}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => void onDrop(e)}
-          >
+          <div className={`dropzone ${dragOver ? 'over' : ''}`}>
             <h1>Drop a shoot day here</h1>
             <p>
-              Cameras and recorders in one folder, one subfolder per device. Everything runs in
-              this tab — your media is never uploaded, and there is no account.
+              Drop files or whole folders, anywhere on this page. Ideally one folder per device —
+              a camera and a recorder, or two cameras. Everything runs in this tab: your media is
+              never uploaded, and there is no account.
             </p>
             <div className="buttons">
-              {hasDirectoryPicker() && (
+              <button className="primary" onClick={() => fileInputRef.current?.click()}>
+                Choose files…
+              </button>
+              {hasDirectoryPicker() ? (
                 <button
-                  className="primary"
                   onClick={() =>
                     void pickDirectory()
-                      .then(startIngest)
+                      .then(addMedia)
                       .catch(() => undefined) /* the user cancelled the picker */
                   }
                 >
-                  Choose folder
+                  Choose a folder…
                 </button>
+              ) : (
+                <button onClick={() => folderInputRef.current?.click()}>Choose a folder…</button>
               )}
-              <button onClick={() => inputRef.current?.click()}>Browse…</button>
             </div>
             <p className="hint">
               Works best in Chrome or Edge. Compressed camera audio (AAC) needs WebCodecs; WAV and
@@ -312,6 +419,18 @@ export function App() {
           <div className="note bad">
             <h3>Problem</h3>
             {error}
+          </div>
+        )}
+
+        {!busy && ignored.length > 0 && (
+          <div className="note warn">
+            <h3>
+              Ignored {ignored.length} file{ignored.length === 1 ? '' : 's'} that {ignored.length === 1 ? 'is' : 'are'} not audio or video
+            </h3>
+            <p style={{ margin: 0 }}>
+              {ignored.slice(0, 8).join(', ')}
+              {ignored.length > 8 ? `, and ${ignored.length - 8} more` : ''}
+            </p>
           </div>
         )}
 

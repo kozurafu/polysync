@@ -325,3 +325,34 @@ footer {
      because wrapped columns are unreadable and unpasteable. */
   tab-size: 2;
 }
+
+/* --------------------------------------------------------------- dropping */
+
+/*
+ * Shown over everything while a drag is in progress, because the drop target is
+ * the whole page rather than one box — and a target you cannot see is one you
+ * do not trust. `pointer-events: none` matters: a veil that swallowed the drop
+ * would be worse than no veil.
+ */
+.drop-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(14, 20, 22, 0.82);
+  border: 2px dashed var(--accent);
+}
+.drop-veil > div {
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 20px 28px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--panel);
+}

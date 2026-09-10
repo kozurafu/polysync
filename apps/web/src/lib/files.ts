@@ -28,6 +28,51 @@ export function isMediaFile(name: string): boolean {
   return MEDIA_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
 }
 
+/**
+ * The `accept` attribute for the file input.
+ *
+ * Both the extensions *and* the wildcards, deliberately. Camera formats like
+ * MTS and MXF frequently have no MIME type registered on the machine, so a
+ * wildcard-only list greys them out in the dialog; and an extension-only list
+ * greys out anything with an unusual suffix. Listing both means the dialog is
+ * filtered without ever disabling a file the app could actually read.
+ */
+export const MEDIA_ACCEPT = [
+  ...[...MEDIA_EXTENSIONS].map((e) => `.${e}`),
+  'video/*',
+  'audio/*',
+].join(',');
+
+/** What a picker or a drop produced. */
+export interface PickResult {
+  files: PickedFile[];
+  /** Names that were not media files, so the UI can say what it ignored. */
+  ignored: string[];
+}
+
+/**
+ * Add newly picked files to what is already loaded.
+ *
+ * Appending rather than replacing, because "Add media" means add. Dropping a
+ * folder of camera files and then a folder of recorder files is the single most
+ * common way to assemble a project, and replacing on the second drop threw the
+ * first one away.
+ *
+ * Keyed on the relative path, so re-dropping the same folder updates in place
+ * instead of duplicating every clip, and a file edited since the last drop
+ * replaces the stale one rather than sitting alongside it.
+ */
+export function mergePicked(existing: PickedFile[], incoming: PickedFile[]): PickedFile[] {
+  const seen = new Map(existing.map((p) => [p.relativePath, p]));
+  for (const pick of incoming) seen.set(pick.relativePath, pick);
+  return [...seen.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+/** Path, size and modification time — enough to tell whether a file changed. */
+export function pickedIdentity(pick: PickedFile): string {
+  return `${pick.relativePath}:${pick.file.size}:${pick.file.lastModified}`;
+}
+
 /** True when this browser can hand us a folder handle it will remember. */
 export function hasDirectoryPicker(): boolean {
   return typeof (window as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
@@ -45,46 +90,58 @@ interface FileSystemHandleLike {
 }
 
 /** Chromium's folder picker. Rejects if the user cancels. */
-export async function pickDirectory(): Promise<PickedFile[]> {
+export async function pickDirectory(): Promise<PickResult> {
   const picker = (window as unknown as { showDirectoryPicker: () => Promise<DirectoryHandleLike> })
     .showDirectoryPicker;
   const root = await picker();
   const out: PickedFile[] = [];
-  await walkHandle(root as unknown as FileSystemHandleLike, '', out);
-  return sortPicked(out);
+  const ignored: string[] = [];
+  await walkHandle(root as unknown as FileSystemHandleLike, '', out, ignored);
+  return { files: sortPicked(out), ignored };
 }
 
 async function walkHandle(
   handle: FileSystemHandleLike,
   prefix: string,
   out: PickedFile[],
+  ignored: string[],
 ): Promise<void> {
   if (!handle.values) return;
   for await (const entry of handle.values()) {
     if (entry.name.startsWith('.')) continue;
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.kind === 'directory') {
-      await walkHandle(entry, path, out);
+      await walkHandle(entry, path, out, ignored);
     } else if (entry.getFile && isMediaFile(entry.name)) {
       out.push({ file: await entry.getFile(), relativePath: path });
+    } else if (entry.kind === 'file') {
+      ignored.push(path);
     }
   }
 }
 
-/** `<input type="file" webkitdirectory>` — a flat list carrying its own paths. */
-export function fromInput(fileList: FileList | null): PickedFile[] {
-  if (!fileList) return [];
+/**
+ * A `<input type="file">` selection, from either the file picker or the folder
+ * picker. Only the folder one sets `webkitRelativePath`; individually chosen
+ * files carry no path at all and land at the root.
+ */
+export function fromInput(fileList: FileList | null): PickResult {
+  if (!fileList) return { files: [], ignored: [] };
   const out: PickedFile[] = [];
+  const ignored: string[] = [];
   for (const file of Array.from(fileList)) {
-    if (!isMediaFile(file.name)) continue;
+    if (!isMediaFile(file.name)) {
+      ignored.push(file.name);
+      continue;
+    }
     const withPath = file as File & { webkitRelativePath?: string };
     const relative = withPath.webkitRelativePath || file.name;
-    // webkitRelativePath includes the dropped folder itself; drop that segment
+    // webkitRelativePath includes the picked folder itself; drop that segment
     // so grouping sees CAM_A/... rather than Rushes/CAM_A/...
     const parts = relative.split('/');
     out.push({ file, relativePath: parts.length > 1 ? parts.slice(1).join('/') : file.name });
   }
-  return sortPicked(out);
+  return { files: sortPicked(out), ignored };
 }
 
 /**
@@ -95,7 +152,7 @@ export function fromInput(fileList: FileList | null): PickedFile[] {
  * captured synchronously — the DataTransfer list is emptied the moment the drop
  * handler yields — which is why the entries are collected before any awaiting.
  */
-export async function fromDrop(dataTransfer: DataTransfer): Promise<PickedFile[]> {
+export async function fromDrop(dataTransfer: DataTransfer): Promise<PickResult> {
   const entries: FileSystemEntryLike[] = [];
   const looseFiles: File[] = [];
 
@@ -113,11 +170,13 @@ export async function fromDrop(dataTransfer: DataTransfer): Promise<PickedFile[]
   }
 
   const out: PickedFile[] = [];
-  for (const entry of entries) await walkEntry(entry, '', out);
+  const ignored: string[] = [];
+  for (const entry of entries) await walkEntry(entry, '', out, ignored);
   for (const file of looseFiles) {
     if (isMediaFile(file.name)) out.push({ file, relativePath: file.name });
+    else ignored.push(file.name);
   }
-  return sortPicked(out);
+  return { files: sortPicked(out), ignored };
 }
 
 interface FileSystemEntryLike {
@@ -134,12 +193,16 @@ async function walkEntry(
   entry: FileSystemEntryLike,
   prefix: string,
   out: PickedFile[],
+  ignored: string[],
 ): Promise<void> {
   if (entry.name.startsWith('.')) return;
   const path = prefix ? `${prefix}/${entry.name}` : entry.name;
 
   if (entry.isFile && entry.file) {
-    if (!isMediaFile(entry.name)) return;
+    if (!isMediaFile(entry.name)) {
+      ignored.push(path);
+      return;
+    }
     const file = await new Promise<File | null>((resolve) => {
       entry.file!((f) => resolve(f), () => resolve(null));
     });
@@ -156,7 +219,7 @@ async function walkEntry(
         reader.readEntries((e) => resolve(e), () => resolve([]));
       });
       if (batch.length === 0) break;
-      for (const child of batch) await walkEntry(child, path, out);
+      for (const child of batch) await walkEntry(child, path, out, ignored);
     }
   }
 }

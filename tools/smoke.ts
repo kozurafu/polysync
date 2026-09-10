@@ -100,6 +100,68 @@ async function dumpDiagnostics(page: import('playwright').Page): Promise<string>
   return report;
 }
 
+/**
+ * The three picking bugs reported on 2026-09-10, checked in a real browser.
+ *
+ *   - dropping anything opened a blank tab: the browser was navigating to the
+ *     file, because nothing called preventDefault on the document;
+ *   - individual files were greyed out in the picker, because the only input
+ *     carried `webkitdirectory` and that makes the dialog folder-only;
+ *   - adding media replaced the project instead of adding to it.
+ */
+async function checkPicking(page: import('playwright').Page, files: string[]): Promise<boolean> {
+  let ok = true;
+
+  // A drag over the page must be swallowed. Without preventDefault on dragover,
+  // `drop` never reaches the app and the browser opens the file instead.
+  const guarded = await page.evaluate(() => {
+    const event = new DragEvent('dragover', { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  console.log(`Drag over the page is swallowed: ${guarded ? 'yes' : 'NO'}`);
+  if (!guarded) {
+    console.error('FAIL: a drop would navigate away and lose the project');
+    ok = false;
+  }
+
+  // Individual files, through the picker that is not folder-only.
+  const fileInput = page.locator('input[type="file"]:not([webkitdirectory])');
+  if ((await fileInput.count()) === 0) {
+    console.error('FAIL: no picker accepts individual files');
+    return false;
+  }
+  const accept = (await fileInput.getAttribute('accept')) ?? '';
+  for (const wanted of ['.mts', '.mxf', 'video/*', 'audio/*']) {
+    if (!accept.includes(wanted)) {
+      console.error(`FAIL: accept list would grey out ${wanted}`);
+      ok = false;
+    }
+  }
+  console.log('Individual-file picker accepts extensions and wildcards: yes');
+
+  const rows = async () => page.locator('table tbody tr').count();
+
+  await fileInput.setInputFiles(files.slice(0, 1));
+  await page.waitForFunction(() => document.querySelectorAll('table tbody tr').length === 1, null, {
+    timeout: 120_000,
+  });
+  console.log(`One individual file loads: ${await rows()} clip`);
+
+  // The second pick must add to the first, not replace it.
+  await fileInput.setInputFiles(files.slice(1, 2));
+  await page.waitForFunction(() => document.querySelectorAll('table tbody tr').length === 2, null, {
+    timeout: 120_000,
+  });
+  const after = await rows();
+  console.log(`A second file appends rather than replacing: ${after} clips`);
+  if (after !== 2) {
+    console.error('FAIL: adding media replaced the project instead of adding to it');
+    ok = false;
+  }
+  return ok;
+}
+
 async function main(): Promise<void> {
   const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
   const root = resolve(positional[0] ?? './sample-shoot');
@@ -136,11 +198,16 @@ async function main(): Promise<void> {
     await page.goto(`http://localhost:${PORT}${BASE}/`, { waitUntil: 'networkidle' });
     console.log(`Loaded the app from http://localhost:${PORT}${BASE}/`);
 
+    // Picking checks first, on an empty project, so they neither depend on nor
+    // disturb the folder flow below.
+    if (!(await checkPicking(page, files))) failed = true;
+    await page.reload({ waitUntil: 'networkidle' });
+
     // Hand the folder itself to the hidden webkitdirectory input: Playwright
     // cannot drive a native picker, but a directory path exercises the same
     // code path the Browse button uses, `webkitRelativePath` included — so the
     // device grouping under test is the real one, not a flat-file fallback.
-    await page.setInputFiles('input[type="file"]', root);
+    await page.setInputFiles('input[webkitdirectory]', root);
     console.log(`Handed it the folder (${files.length} media files)`);
 
     await page.waitForSelector('table tbody tr', { timeout: 120_000 });
