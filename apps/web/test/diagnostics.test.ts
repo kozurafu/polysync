@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { GroupResult } from '@polysync/media-io';
 import type { SyncResult } from '@polysync/sync-core';
+import { RATE_25 } from '@polysync/timecode';
 import { buildDiagnosticReport, type DiagnosticInput, type EnvironmentInfo } from '../src/lib/diagnostics.ts';
 import type { IngestedClip } from '../src/lib/engine.ts';
 
@@ -50,6 +51,8 @@ function input(over: Partial<DiagnosticInput> = {}): DiagnosticInput {
     overrides: {},
     result: null,
     timings: { ingestSeconds: 48.2 },
+    rate: RATE_25,
+    trackLayout: 'per-device',
     settings: { projectName: 'shoot_day_01', frameRate: '25', mediaRoot: '' },
     ...over,
   };
@@ -101,6 +104,7 @@ describe('buildDiagnosticReport', () => {
       deviceIds: ['C2'],
       basis: 'filename-prefix',
       warnings: ['All 70 clips look like they came from one device (C2).'],
+      attempts: [],
     };
     const report = buildDiagnosticReport(input({ grouping }));
     expect(report).toContain('filename-prefix');
@@ -197,6 +201,110 @@ describe('buildDiagnosticReport', () => {
       const report = buildDiagnosticReport(input({ result }));
       expect(report).toContain('MATCHES THAT DISAGREE');
       expect(report).toContain('43 ms');
+    });
+
+    it('shows which strategy nearly worked, and what defeated it', () => {
+      // The report once said only `grouped by extension-class` — the last
+      // resort — with no hint why. The answer was that the prefix rule read 33
+      // of 37 filenames and was discarded over the four it could not.
+      const grouping: GroupResult = {
+        assignments: [],
+        deviceIds: ['VIDEO', 'AUDIO'],
+        basis: 'extension-class',
+        warnings: [],
+        attempts: [
+          { basis: 'card-structure', named: 0, devices: 0, unnamed: [], verdict: 'could not name 2 of 2 file(s)' },
+          {
+            basis: 'filename-prefix',
+            named: 1,
+            devices: 1,
+            unnamed: ['01 260821_140448.mp3'],
+            verdict: 'could not name 1 of 2 file(s)',
+          },
+          { basis: 'extension-class', named: 2, devices: 2, unnamed: [], verdict: '' },
+        ],
+      };
+      const report = buildDiagnosticReport(input({ grouping }));
+      expect(report).toContain('HOW THE DEVICES WERE WORKED OUT');
+      expect(report).toContain('could not name: 01 260821_140448.mp3');
+      expect(report).toContain('<- used');
+    });
+
+    it('names the clips stranded in each island', () => {
+      // `groups 10` said a project had not solved and nothing about which
+      // clips were stuck with which, which is the part worth knowing.
+      const report = buildDiagnosticReport(input({ result }));
+      expect(report).toContain('ISLANDS (2)');
+      expect(report).toContain('CAM/C2_4928.MP4');
+    });
+
+    it('warns when every match barely cleared the threshold', () => {
+      // A run where everything scrapes past is a different problem from one
+      // where half the clips fail, and the placements table does not separate
+      // them. This is what speech-isolated audio looks like.
+      const weak: SyncResult = {
+        ...result,
+        pairs: [
+          { ...result.pairs[0], accepted: true, quality: 0.31 },
+          { ...result.pairs[0], accepted: true, quality: 0.34 },
+          { ...result.pairs[0], accepted: true, quality: 0.36 },
+        ],
+      };
+      const report = buildDiagnosticReport(input({ result: weak }));
+      expect(report).toContain('HOW STRONG THE MATCHES WERE');
+      expect(report).toContain('below 0.50         3 of 3');
+      expect(report).toContain('transients removed');
+    });
+
+    it('does not cry wolf when the matches are strong', () => {
+      const strong: SyncResult = {
+        ...result,
+        pairs: [
+          { ...result.pairs[0], accepted: true, quality: 0.97 },
+          { ...result.pairs[0], accepted: true, quality: 0.99 },
+        ],
+      };
+      expect(buildDiagnosticReport(input({ result: strong }))).not.toContain('transients removed');
+    });
+
+    it('reports what the XML export would actually contain', () => {
+      // Three consecutive bug reports were export bugs and the report covered
+      // none of it: all of it was in the file the user already had, and none
+      // of it was in the report they sent.
+      const report = buildDiagnosticReport(input({ result }));
+      expect(report).toContain('WHAT THE XML EXPORT WOULD CONTAIN');
+      expect(report).toContain('track layout       per-device');
+      expect(report).toContain('importer elements  all present');
+
+      // And it must not report an element as missing when the project has
+      // nothing for it to do — a false alarm in a diagnostic sends the next
+      // person chasing a bug that is not there.
+      const monoAudioOnly = buildDiagnosticReport(
+        input({
+          result,
+          clips: [
+            clip('C2_4928', { probe: { ...clip('x').probe, hasVideo: false, channels: 1 } }),
+            clip('C2_4929', { probe: { ...clip('x').probe, hasVideo: false, channels: 1 } }),
+          ],
+        }),
+      );
+      expect(monoAudioOnly).not.toContain('MISSING link');
+      expect(monoAudioOnly).toContain('link not needed here');
+      expect(report).toContain('clips hidden       none');
+    });
+
+    it('flags paths the NLE will not be able to relink', () => {
+      const report = buildDiagnosticReport(input({ result }));
+      // The fixture's clips live at CAM/..., so a blank media folder still
+      // leaves a folder to relink from and there is nothing to warn about.
+      expect(report).toContain('example path');
+      const flat = buildDiagnosticReport(
+        input({
+          result,
+          clips: [clip('C2_4928', { relativePath: 'C2_4928.MP4' }), clip('C2_4929', { relativePath: 'C2_4929.MP4' })],
+        }),
+      );
+      expect(flat).toContain('have no folder at all');
     });
 
     it('includes both timings', () => {

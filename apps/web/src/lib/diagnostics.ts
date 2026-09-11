@@ -23,6 +23,9 @@
  */
 
 import type { GroupResult } from '@polysync/media-io';
+import { exportFcp7Xml, sequenceFrameSize } from '@polysync/exporters';
+import type { FrameRate } from '@polysync/timecode';
+import { buildTimeline, type TrackLayout } from './exportProject.ts';
 import type { PairAlignment, SyncResult } from '@polysync/sync-core';
 import type { IngestFailure, IngestedClip } from './engine.ts';
 
@@ -54,6 +57,9 @@ export interface DiagnosticInput {
   result: SyncResult | null;
   timings: { ingestSeconds?: number; solveSeconds?: number };
   settings: { projectName: string; frameRate: string; mediaRoot: string };
+  /** Needed to show what the export would actually write. */
+  rate: FrameRate | null;
+  trackLayout: TrackLayout;
 }
 
 const MAX_CLIP_ROWS = 200;
@@ -117,9 +123,63 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
   line(`frame rate         ${input.settings.frameRate}`);
   line(`media folder       ${input.settings.mediaRoot || '(blank — export paths will be relative)'}`);
 
+  // ------------------------------------------------------------- grouping
+  // Which strategy won is only half the story. The half that matters when the
+  // grouping is wrong is which one nearly worked, and what defeated it.
+  if (input.grouping?.attempts.length) {
+    heading('HOW THE DEVICES WERE WORKED OUT');
+    line(pad('STRATEGY', 20) + pad('NAMED', 10) + pad('DEVICES', 9) + 'VERDICT');
+    for (const a of input.grouping.attempts) {
+      line(
+        pad(a.basis, 20) +
+          pad(`${a.named}/${input.clips.length}`, 10) +
+          pad(String(a.devices), 9) +
+          (a.basis === input.grouping.basis && !a.verdict ? '<- used' : a.verdict),
+      );
+      if (a.unnamed.length) line(`  could not name: ${a.unnamed.join(', ')}`);
+    }
+  }
+
+  // --------------------------------------------------------------- devices
+  if (input.clips.length) {
+    const byDevice = new Map<string, IngestedClip[]>();
+    for (const clip of input.clips) {
+      const device = input.deviceOf(clip.id);
+      const list = byDevice.get(device);
+      if (list) list.push(clip);
+      else byDevice.set(device, [clip]);
+    }
+    heading(`DEVICES (${byDevice.size})`);
+    line(pad('DEVICE', 16) + pad('CLIPS', 7) + pad('TOTAL', 10) + pad('FORMAT', 22) + 'FILES LOOK LIKE');
+    for (const [device, on] of byDevice) {
+      const total = on.reduce((t, c) => t + c.durationSeconds, 0);
+      const formats = [...new Set(on.map(formatOf))];
+      line(
+        pad(device, 16) +
+          pad(String(on.length), 7) +
+          pad(`${(total / 60).toFixed(1)}m`, 10) +
+          pad(formats.length > 1 ? `${formats.length} formats` : (formats[0] ?? '?'), 22) +
+          [...new Set(on.map((c) => stem(c.name)))].slice(0, 3).join(', '),
+      );
+      // A device holding several unrelated filename stems is usually two real
+      // devices merged, which silently cancels every comparison between them.
+      const stems = new Set(on.map((c) => stem(c.name)));
+      if (stems.size > 1 && on.length > 2) {
+        line(`  ! ${stems.size} different filename prefixes here — this may be more than one device`);
+      }
+      if (formats.length > 1) {
+        line(`  ! mixed formats on one device: ${formats.join(' / ')}`);
+      }
+    }
+  }
+
   heading('TIMING');
   line(`decode             ${seconds(input.timings.ingestSeconds)}`);
   line(`solve              ${seconds(input.timings.solveSeconds)}`);
+  if (input.result && input.result.stats.aligned > 0 && input.timings.solveSeconds) {
+    const per = (input.timings.solveSeconds / input.result.stats.aligned) * 1000;
+    line(`per pair compared  ${per.toFixed(0)} ms  (${input.result.stats.aligned} pairs)`);
+  }
 
   // ------------------------------------------------------------------ clips
   heading(`CLIPS (${input.clips.length})`);
@@ -199,6 +259,53 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
         line('     Set the right device on some clips and run it again.');
       } else if (stats.skippedByRecordingTime > 0) {
         line('     ' + stats.skippedByRecordingTime + ' were ruled out on recording time.');
+      }
+    }
+
+    // A project that solves into several groups has not solved: each group is
+    // an island with its own arbitrary zero, and only clips within one island
+    // are actually in sync with each other. `groups 10` said that and no more,
+    // which left the most important question — which clips are stranded
+    // together — needing the placements read by hand.
+    if (result.groupCount > 1) {
+      const byGroup = new Map<number, string[]>();
+      for (const p of result.placements) {
+        const list = byGroup.get(p.groupId);
+        const name = input.clips.find((c) => c.id === p.clipId)?.relativePath ?? p.clipId;
+        if (list) list.push(name);
+        else byGroup.set(p.groupId, [name]);
+      }
+      heading(`ISLANDS (${byGroup.size})`);
+      line('  Clips are only in sync with others in the same island. Separate islands were');
+      line('  never matched to each other, so their positions are independent guesses.');
+      line('');
+      for (const [id, names] of [...byGroup.entries()].sort((a, b) => b[1].length - a[1].length)) {
+        line(`  island ${id}  (${names.length} clip${names.length === 1 ? '' : 's'})`);
+        for (const name of names.slice(0, 8)) line(`      ${name}`);
+        if (names.length > 8) line(`      … ${names.length - 8} more`);
+      }
+    }
+
+    // How convincing the accepted matches were. A run where everything scrapes
+    // past the threshold is a different problem from a run where half the
+    // clips fail outright, and the placements table alone does not separate
+    // them — the speech-isolated audio that made every match marginal looked,
+    // clip by clip, like an ordinary partial success.
+    const accepted = result.pairs.filter((p) => p.accepted);
+    if (accepted.length) {
+      const qualities = accepted.map((p) => p.quality).sort((a, b) => a - b);
+      const at = (f: number) => qualities[Math.min(qualities.length - 1, Math.floor(f * qualities.length))];
+      const marginal = qualities.filter((q) => q < 0.5).length;
+      heading('HOW STRONG THE MATCHES WERE');
+      line(`accepted matches   ${accepted.length}`);
+      line(`quality  worst ${qualities[0].toFixed(3)}   median ${at(0.5).toFixed(3)}   best ${qualities[qualities.length - 1].toFixed(3)}`);
+      line(`below 0.50         ${marginal} of ${accepted.length}`);
+      if (marginal * 2 > accepted.length) {
+        line('');
+        line('  ! Most matches barely cleared the threshold. That usually means the audio being');
+        line('    compared has had its transients removed — noise reduction, speech isolation or');
+        line('    a heavy codec. Sync locks onto claps, thumps and footsteps, and those are the');
+        line('    first thing such processing strips. Try the original recordings if you have them.');
       }
     }
 
@@ -282,9 +389,115 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     }
   }
 
+  // ---------------------------------------------------------------- export
+  // The report said nothing whatever about the export, and three consecutive
+  // bug reports were export bugs: clips stacked on one track, every path
+  // exported as a bare filename, a sequence with no format, and an XMEML the
+  // importer could not build a timeline from. All of it was visible in the
+  // file the user already had; none of it was in the report they sent.
+  if (input.result && input.rate) {
+    heading('WHAT THE XML EXPORT WOULD CONTAIN');
+    try {
+      const timeline = buildTimeline({
+        projectName: input.settings.projectName,
+        clips: input.clips,
+        result: input.result,
+        deviceOf: input.deviceOf,
+        mediaRoot: input.settings.mediaRoot,
+        rate: input.rate,
+        trackLayout: input.trackLayout,
+      });
+      const xml = exportFcp7Xml(timeline);
+      const comments = [...xml.matchAll(/<!-- (.*?) -->/g)].map((m) => m[1]);
+      const videoTracks = comments.filter((c) => !/ ch\d+$/.test(c));
+      const audioTracks = comments.filter((c) => / ch\d+$/.test(c));
+      const frame = sequenceFrameSize(timeline.clips);
+
+      line(`track layout       ${input.trackLayout}`);
+      line(`sequence format    ${frame ? `${frame.width}x${frame.height}` : '(no clip has picture)'}`);
+      line(`video tracks       ${videoTracks.length}`);
+      videoTracks.forEach((c, i) => line(`  V${i + 1}  ${c}`));
+      line(`audio tracks       ${audioTracks.length}`);
+      audioTracks.forEach((c, i) => line(`  A${i + 1}  ${c}`));
+
+      // Structural elements the importer needs. Their absence does not stop
+      // the XML parsing, which is exactly why it went unnoticed for so long.
+      //
+      // Each is only expected when the project actually calls for it. A link
+      // group needs something to link — a clip with picture *and* sound, or
+      // more than one channel — so a project of mono WAVs legitimately has
+      // none, and reporting that as missing would send the next person after a
+      // bug that is not there.
+      const linkable = timeline.clips.some(
+        (c) => (c.hasVideo && c.hasAudio) || (c.hasAudio && (c.audioChannels ?? 2) > 1),
+      );
+      const anyAudio = timeline.clips.some((c) => c.hasAudio);
+      const required: Array<[string, boolean]> = [
+        ['masterclipid', true],
+        ['link', linkable],
+        ['outputs', anyAudio],
+        ['outputchannelindex', anyAudio],
+        ['timecode', true],
+      ];
+      const missing = required
+        .filter(([tag, expected]) => expected && !xml.includes(`<${tag}>`))
+        .map(([tag]) => tag);
+      const skipped = required.filter(([, expected]) => !expected).map(([tag]) => tag);
+      line(
+        `importer elements  ${missing.length ? `MISSING ${missing.join(', ')}` : 'all present'}` +
+          (skipped.length ? `  (${skipped.join(', ')} not needed here)` : ''),
+      );
+
+      const paths = [...xml.matchAll(/<pathurl>(.*?)<\/pathurl>/g)].map((m) => m[1]);
+      const bare = paths.filter(
+        (path) => !path.replace('file://', '').replace(/^\//, '').includes('/'),
+      );
+      line(`media folder       ${input.settings.mediaRoot || '(blank)'}`);
+      line(`example path       ${paths[0] ?? '(none)'}`);
+      if (bare.length) {
+        line(
+          `  ! ${bare.length} clip(s) have no folder at all, so the NLE must relink them one ` +
+            `at a time. Pick the folder rather than the files, or fill in the media folder.`,
+        );
+      }
+
+      // The invariant the per-device layout must never break.
+      let hidden = 0;
+      for (const block of xml.split('<track>').slice(1)) {
+        const spans = [...block.matchAll(/<start>(-?\d+)<\/start>\s*<end>(-?\d+)<\/end>/g)]
+          .map((m) => ({ from: Number(m[1]), to: Number(m[2]) }))
+          .sort((a, b) => a.from - b.from);
+        for (let i = 1; i < spans.length; i++) if (spans[i].from < spans[i - 1].to) hidden++;
+      }
+      line(`clips hidden       ${hidden === 0 ? 'none' : `${hidden} — a clip sits behind another`}`);
+    } catch (error) {
+      line(`  export failed to build: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   line();
   line('end of report');
   return out.join('\n');
+}
+
+/** Resolution and rate, or the audio format for a clip with no picture. */
+function formatOf(clip: IngestedClip): string {
+  if (clip.probe.hasVideo && clip.probe.width && clip.probe.height) {
+    return `${clip.probe.width}x${clip.probe.height}`;
+  }
+  return `${clip.probe.audioCodec ?? '?'} ${clip.probe.sampleRate / 1000}k x${clip.probe.channels}`;
+}
+
+/**
+ * The leading run of letters and digits a camera puts on its files, so that
+ * `C2_4737.MP4` and `C2_4738.MP4` read as one prefix and `C1_4677.MP4` as
+ * another. Used only to notice that one device is holding files that do not
+ * look like they came from the same camera.
+ */
+function stem(name: string): string {
+  const base = (name.split('/').pop() ?? name).replace(/\.[^.]+$/, '');
+  const m = /^([A-Za-z]+\d*|\d+)/.exec(base);
+  return m ? m[1].toUpperCase() : base.slice(0, 4).toUpperCase();
 }
 
 /**

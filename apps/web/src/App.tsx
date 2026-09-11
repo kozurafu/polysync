@@ -261,6 +261,8 @@ export function App() {
         overrides,
         result,
         timings,
+        rate,
+        trackLayout,
         settings: {
           projectName,
           frameRate: FRAME_RATES.find((r) => rate && sameRate(r.rate, rate))?.label ?? '25',
@@ -271,7 +273,7 @@ export function App() {
     setCopied(false);
   }, [
     picked, clips, failures, grouping, deviceOf, overrides,
-    result, timings, projectName, rate, mediaRoot,
+    result, timings, projectName, rate, mediaRoot, trackLayout,
   ]);
 
   const copyReport = useCallback(async () => {

@@ -37,6 +37,18 @@ export interface GroupAssignment {
   basis: GroupBasis;
 }
 
+export interface GroupAttempt {
+  basis: GroupBasis;
+  /** How many files this strategy could name. */
+  named: number;
+  /** How many distinct devices it found among those. */
+  devices: number;
+  /** A few files it could not name — the ones that cost it the project. */
+  unnamed: string[];
+  /** Why it did not win, in words. Empty for the strategy that did. */
+  verdict: string;
+}
+
 export interface GroupResult {
   assignments: GroupAssignment[];
   /** Device ids in a stable order: cards and cameras first, audio last. */
@@ -48,6 +60,17 @@ export interface GroupResult {
    * which is the commonest cause of an AVCHD card syncing as loose fragments.
    */
   warnings: string[];
+  /**
+   * What each strategy would have produced, winner or not.
+   *
+   * Added because a real report said only `grouped by extension-class`, which
+   * is the last resort, and gave no hint why. The answer was that the prefix
+   * rule read 33 of 37 filenames perfectly and was discarded over the four it
+   * could not — invisible from the outside, and an hour of digging to find.
+   * A strategy that almost worked, and the files that defeated it, is the
+   * single most useful thing to know when the grouping comes out wrong.
+   */
+  attempts: GroupAttempt[];
 }
 
 /**
@@ -69,7 +92,7 @@ const AUDIO_EXTENSIONS = new Set(['wav', 'bwf', 'w64', 'rf64', 'aif', 'aiff', 'f
 
 export function groupClips(inputs: GroupInput[]): GroupResult {
   if (inputs.length === 0) {
-    return { assignments: [], deviceIds: [], basis: 'directory', warnings: [] };
+    return { assignments: [], deviceIds: [], basis: 'directory', warnings: [], attempts: [] };
   }
 
   // Computed before any strategy runs, and independently of which one wins.
@@ -96,6 +119,25 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
   const answers = strategies.map(({ basis, keys }) => ({ basis, keys: keys() }));
   const specific = answers.filter((a) => a.basis !== 'extension-class');
 
+  // Recorded whether or not a strategy wins, so a report can show the near
+  // miss rather than only the last resort that ended up being used.
+  const attempts: GroupAttempt[] = answers.map(({ basis, keys }) => {
+    const named = keys.filter((k) => k !== undefined).length;
+    const unnamed = inputs.filter((_, i) => keys[i] === undefined).map((i) => baseName(i.path));
+    return {
+      basis,
+      named,
+      devices: new Set(keys.filter((k) => k !== undefined)).size,
+      unnamed: unnamed.slice(0, 5),
+      verdict:
+        named < inputs.length
+          ? `could not name ${inputs.length - named} of ${inputs.length} file(s)`
+          : new Set(keys).size < 2
+            ? 'named everything, but found only one device'
+            : '',
+    };
+  });
+
   // The first strategy that manages to name every file, kept aside in case no
   // strategy manages to split them. A folder of one camera's rushes really is
   // one device, and calling it `C2` because that is what the files are called
@@ -112,7 +154,7 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
     // actually identified something. One device is not yet a reason to stop —
     // a later strategy may still separate them.
     if (new Set(named).size < 2) continue;
-    return finish(inputs, named, basis, warnings);
+    return finish(inputs, named, basis, warnings, attempts);
   }
 
   // Nothing named the whole project on its own, so let each file take the most
@@ -141,19 +183,19 @@ export function groupClips(inputs: GroupInput[]): GroupResult {
       const tally = new Map<GroupBasis, number>();
       for (const c of composed) tally.set(c!.basis, (tally.get(c!.basis) ?? 0) + 1);
       const basis = [...tally.entries()].sort((a, b) => b[1] - a[1])[0][0];
-      return finish(inputs, named, basis, warnings);
+      return finish(inputs, named, basis, warnings, attempts);
     }
   }
 
-  if (fallback) return finish(inputs, fallback.keys, fallback.basis, warnings);
+  if (fallback) return finish(inputs, fallback.keys, fallback.basis, warnings, attempts);
 
   const extension = answers[answers.length - 1].keys;
   if (extension.every((k) => k !== undefined)) {
-    return finish(inputs, extension as string[], 'extension-class', warnings);
+    return finish(inputs, extension as string[], 'extension-class', warnings, attempts);
   }
 
   const only = inputs.length === 1 ? deviceNameFor(inputs[0]) : 'DEVICE_1';
-  return finish(inputs, inputs.map(() => only), 'extension-class', warnings);
+  return finish(inputs, inputs.map(() => only), 'extension-class', warnings, attempts);
 }
 
 function finish(
@@ -161,6 +203,7 @@ function finish(
   keys: string[],
   basis: GroupBasis,
   warnings: string[],
+  attempts: GroupAttempt[],
 ): GroupResult {
   const assignments = inputs.map((input, i) => ({
     clipId: input.id,
@@ -180,7 +223,7 @@ function finish(
     );
   }
 
-  return { assignments, deviceIds, basis, warnings };
+  return { assignments, deviceIds, basis, warnings, attempts };
 }
 
 /** The folder containing a recognised card structure. */
