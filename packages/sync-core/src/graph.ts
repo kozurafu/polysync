@@ -76,6 +76,16 @@ class UnionFind {
  * recorder, camera C syncs to camera B, and C lands correctly even though C and
  * the recorder never correlated directly.
  */
+/**
+ * How much same-device overlap to forgive, seconds.
+ *
+ * A camera's consecutive takes butt up against each other, and a frame of
+ * rounding either way must not read as two clips stacked. Half a frame at
+ * 24 fps is comfortably inside any real gap between takes and far below any
+ * overlap worth rejecting an edge over.
+ */
+const SAME_DEVICE_TOLERANCE_SECONDS = 0.02;
+
 export function syncProject(
   clips: AudioClip[],
   options: Partial<SyncOptions> = {},
@@ -90,6 +100,7 @@ export function syncProject(
     skippedByRecordingTime: 0,
     skippedByEnvelope: 0,
     aligned: 0,
+    rejectedByOverlap: 0,
   };
 
   if (n === 0) {
@@ -163,50 +174,115 @@ export function syncProject(
     .filter((p) => p.accepted)
     .sort((a, b) => scoreEdge(b) - scoreEdge(a));
 
-  // Maximum-confidence spanning forest.
+  // Maximum-confidence spanning forest, built with positions carried along.
+  //
+  // Positions used to be assigned afterwards, by walking the finished tree.
+  // That made it impossible to notice that an edge was about to produce
+  // something physically impossible until it already had: a real 241-clip
+  // project came back with 69 pairs of same-device clips laid on top of each
+  // other, two of them overlapping by 22 minutes.
+  //
+  // A device records one clip at a time. We already trust that enough to skip
+  // 20,058 comparisons on it; declining to apply it to placement as well was
+  // simply inconsistent. Now an edge that would stack two clips from one
+  // device is rejected however confident it looked, and the next-best edge
+  // gets its turn — which is the whole point of taking them in confidence
+  // order.
+  report(0.85, 'Solving timeline');
   const uf = new UnionFind(n);
   const tree: PairAlignment[] = [];
-  const adjacency: Array<Array<{ to: number; offset: number; edge: PairAlignment }>> = Array.from(
-    { length: n },
-    () => [],
-  );
+  const bestQuality = new Array<number>(n).fill(0);
+
+  // Position of each clip relative to its component's arbitrary origin, and
+  // the membership needed to shift a whole component when two of them merge.
+  const relative = new Float64Array(n);
+  const members = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) members.set(i, [i]);
+
+  const lengthOf = (i: number) => prepared[i].durationSeconds;
+  const deviceOf = (i: number) => clips[i].trackId;
+
+  /**
+   * Would merging these two components at this offset stack two clips from
+   * one device? Only same-device pairs can say — everything else is free to
+   * overlap, and usually should.
+   */
+  const wouldStack = (left: number[], right: number[], delta: number): boolean => {
+    const byDevice = new Map<string, number[]>();
+    for (const i of left) {
+      const device = deviceOf(i);
+      if (device == null) continue;
+      const list = byDevice.get(device);
+      if (list) list.push(i);
+      else byDevice.set(device, [i]);
+    }
+    if (byDevice.size === 0) return false;
+    for (const j of right) {
+      const device = deviceOf(j);
+      if (device == null) continue;
+      const peers = byDevice.get(device);
+      if (!peers) continue;
+      const from = relative[j] + delta;
+      const to = from + lengthOf(j);
+      for (const i of peers) {
+        // Touching end-to-start is exactly how a camera's own takes sit, so
+        // only a real overlap counts. The tolerance keeps rounding from
+        // turning a clean butt-join into a rejection.
+        if (from < relative[i] + lengthOf(i) - SAME_DEVICE_TOLERANCE_SECONDS &&
+            relative[i] < to - SAME_DEVICE_TOLERANCE_SECONDS) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
   for (const edge of accepted) {
     const a = indexById.get(edge.aId)!;
     const b = indexById.get(edge.bId)!;
-    if (uf.union(a, b)) {
-      tree.push(edge);
-      adjacency[a].push({ to: b, offset: edge.offsetSeconds, edge });
-      adjacency[b].push({ to: a, offset: -edge.offsetSeconds, edge });
+    const ra = uf.find(a);
+    const rb = uf.find(b);
+    if (ra === rb) continue;
+
+    const left = members.get(ra)!;
+    const right = members.get(rb)!;
+    // Shift needed on b's component so that b lands at a's position + offset.
+    const delta = relative[a] + edge.offsetSeconds - relative[b];
+    if (wouldStack(left, right, delta)) {
+      stats.rejectedByOverlap++;
+      continue;
     }
+
+    for (const m of right) relative[m] += delta;
+    uf.union(a, b);
+    const root = uf.find(a);
+    const merged = root === ra ? [...left, ...right] : [...right, ...left];
+    members.set(root, merged);
+    if (root !== ra) members.delete(ra);
+    if (root !== rb) members.delete(rb);
+
+    tree.push(edge);
+    bestQuality[a] = Math.max(bestQuality[a], edge.quality);
+    bestQuality[b] = Math.max(bestQuality[b], edge.quality);
   }
 
-  // Assign positions per connected component by breadth-first traversal.
-  report(0.85, 'Solving timeline');
   const position = new Array<number | null>(n).fill(null);
   const group = new Array<number>(n).fill(-1);
-  const bestQuality = new Array<number>(n).fill(0);
   const components: number[][] = [];
-
-  for (let start = 0; start < n; start++) {
-    if (position[start] !== null) continue;
+  for (let i = 0; i < n; i++) {
+    const root = uf.find(i);
+    if (group[i] !== -1) continue;
     const groupId = components.length;
-    const members: number[] = [];
-    position[start] = 0;
-    group[start] = groupId;
-    const queue = [start];
-    while (queue.length) {
-      const cur = queue.shift()!;
-      members.push(cur);
-      for (const link of adjacency[cur]) {
-        if (position[link.to] !== null) continue;
-        position[link.to] = position[cur]! + link.offset;
-        group[link.to] = groupId;
-        bestQuality[link.to] = Math.max(bestQuality[link.to], link.edge.quality);
-        bestQuality[cur] = Math.max(bestQuality[cur], link.edge.quality);
-        queue.push(link.to);
-      }
+    const list = members.get(root) ?? [i];
+    // Re-origin each component at its earliest clip, so a component's numbers
+    // read as a timeline rather than as offsets from whichever clip happened
+    // to be its root.
+    const base = Math.min(...list.map((m) => relative[m]));
+    for (const m of list) {
+      position[m] = relative[m] - base;
+      group[m] = groupId;
     }
-    components.push(members);
+    components.push(list);
   }
 
   // Consistency check: every accepted edge NOT in the tree is an independent

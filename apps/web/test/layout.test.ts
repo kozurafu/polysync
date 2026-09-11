@@ -57,6 +57,7 @@ function project(specs: Spec[], over: Partial<ExportInput> = {}): TimelineProjec
       skippedByRecordingTime: 0,
       skippedByEnvelope: 0,
       aligned: 0,
+      rejectedByOverlap: 0,
     },
   };
   const deviceById = new Map(specs.map((s) => [s.id, s.device]));
@@ -220,5 +221,53 @@ describe('packLanes', () => {
 describe('the defaults', () => {
   it('budgets four video tracks and ten audio', () => {
     expect(DEFAULT_TRACK_LIMITS).toEqual({ maxVideoTracks: 4, maxAudioTracks: 10 });
+  });
+});
+
+describe('a device whose own clips overlap', () => {
+  // A real export hid 203 clips behind others, because every device got
+  // exactly one track and the solve had stacked clips within a device. The
+  // solve no longer does that, but the layout must not depend on it: a
+  // hand-set device, a re-grouped project, or two cameras a user merged can
+  // all leave one device holding overlapping clips.
+  const overlapping: Spec[] = [
+    RECORDER,
+    { id: 'C2_a', device: 'C2', start: 10, duration: 100, video: true },
+    { id: 'C2_b', device: 'C2', start: 50, duration: 100, video: true },
+    { id: 'C2_c', device: 'C2', start: 300, duration: 50, video: true },
+  ];
+
+  it('gives the overlap another track instead of hiding it', () => {
+    const t = tracks(project(overlapping));
+    expect(t.video).toHaveLength(2);
+    // The third clip does not overlap the first, so it shares that track
+    // rather than claiming a third.
+    expect(t.video[0]).toContain('C2');
+    expect(t.video[1]).toContain('C2');
+  });
+
+  it('never leaves a clip sitting behind another', () => {
+    const xml = exportFcp7Xml(project(overlapping));
+    for (const block of xml.split('<track>').slice(1)) {
+      const spans = [...block.matchAll(/<start>(-?\d+)<\/start>\s*<end>(-?\d+)<\/end>/g)]
+        .map((m) => ({ from: Number(m[1]), to: Number(m[2]) }))
+        .sort((a, b) => a.from - b.from);
+      for (let i = 1; i < spans.length; i++) {
+        expect(spans[i].from, 'a clip is hidden behind another').toBeGreaterThanOrEqual(
+          spans[i - 1].to,
+        );
+      }
+    }
+  });
+
+  it('leaves a well-behaved device on one track', () => {
+    const t = tracks(
+      project([
+        RECORDER,
+        { id: 'C2_a', device: 'C2', start: 10, duration: 30, video: true },
+        { id: 'C2_b', device: 'C2', start: 50, duration: 30, video: true },
+      ]),
+    );
+    expect(t.video).toEqual(['C2']);
   });
 });

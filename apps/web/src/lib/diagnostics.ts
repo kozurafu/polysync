@@ -65,6 +65,13 @@ export interface DiagnosticInput {
 const MAX_CLIP_ROWS = 200;
 const MAX_NEAR_MISSES = 25;
 
+/**
+ * Drift past this is a failed measurement rather than a clock error. Real
+ * hardware sits in the single or low double digits; a few hundred ppm would
+ * already be a visibly broken crystal.
+ */
+const IMPLAUSIBLE_DRIFT_PPM = 500;
+
 export function buildDiagnosticReport(input: DiagnosticInput): string {
   const out: string[] = [];
   const line = (s = '') => out.push(s);
@@ -199,7 +206,7 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     );
     for (const clip of input.clips.slice(0, MAX_CLIP_ROWS)) {
       line(
-        pad(clip.relativePath, 34) +
+        padPath(clip.relativePath, 34) +
           pad(input.deviceOf(clip.id), 12) +
           pad(`${clip.durationSeconds.toFixed(2)}s`, 10) +
           pad(String(clip.probe.sampleRate), 8) +
@@ -243,6 +250,7 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     line(`  skipped same dev ${stats.skippedBySameDevice}`);
     line(`  skipped rec time ${stats.skippedByRecordingTime}`);
     line(`  skipped envelope ${stats.skippedByEnvelope}`);
+    line(`rejected: would stack  ${stats.rejectedByOverlap}  (matches the solve refused to act on)`);
     line(`accepted edges     ${result.pairs.filter((p) => p.accepted).length}`);
 
     // Zero comparisons is not a result, it is a broken run: the solve finished
@@ -314,7 +322,7 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     for (const p of [...result.placements].sort((a, b) => a.startSeconds - b.startSeconds)) {
       const clip = input.clips.find((c) => c.id === p.clipId);
       line(
-        pad(clip?.relativePath ?? p.clipId, 34) +
+        padPath(clip?.relativePath ?? p.clipId, 34) +
           pad(p.trackId, 12) +
           pad(`${p.startSeconds.toFixed(3)}s`, 12) +
           pad(p.quality !== undefined ? p.quality.toFixed(3) : '—', 9) +
@@ -327,6 +335,27 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     // matched, the closest it came and which threshold turned it away. Without
     // this the report only restates what the screen already shows.
     if (result.unsyncedClipIds.length) {
+      // A clip shorter than the minimum overlap cannot be matched by audio at
+      // all, whatever it contains. Reporting its near miss as though a better
+      // recording would have saved it is misleading: twelve of eighteen
+      // unsynced clips in a real report were in this category, several under a
+      // second long, and the report showed each one a tantalising 0.97 quality
+      // against a clip it could never have been joined to.
+      const minOverlap = 3;
+      const tooShort = result.unsyncedClipIds
+        .map((id) => input.clips.find((c) => c.id === id))
+        .filter((c): c is IngestedClip => !!c && c.durationSeconds < minOverlap);
+      if (tooShort.length) {
+        heading(`TOO SHORT TO SYNC AT ALL (${tooShort.length})`);
+        line(`  Matching needs ${minOverlap}s of shared audio. These clips are shorter than that,`);
+        line('  so no amount of audio quality could place them. Cut them longer, or place');
+        line('  them by hand against the clips either side.');
+        line('');
+        for (const clip of tooShort) {
+          line(`  ${clip.relativePath}   ${clip.durationSeconds.toFixed(2)}s`);
+        }
+      }
+
       heading(`WHY EACH UNSYNCED CLIP DID NOT MATCH (${result.unsyncedClipIds.length})`);
       const shown = result.unsyncedClipIds.slice(0, MAX_NEAR_MISSES);
       for (const id of shown) {
@@ -355,6 +384,26 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     if (result.inconsistencies.length) {
       const name = (id: string) =>
         input.clips.find((c) => c.id === id)?.relativePath ?? id;
+      // Drift the hardware could not actually have. A crystal off by more than
+      // a few hundred ppm would be visibly broken; a four-figure reading is a
+      // failed measurement, and reporting it as fact sends people looking for a
+      // clock problem that is not there. The real cause is usually a short clip
+      // or a weak match giving the regression too little to work with.
+      const wild = result.placements.filter(
+        (p) => p.driftPpm !== undefined && Math.abs(p.driftPpm) > IMPLAUSIBLE_DRIFT_PPM,
+      );
+      if (wild.length) {
+        heading(`DRIFT READINGS TO IGNORE (${wild.length})`);
+        line(`  Anything past ${IMPLAUSIBLE_DRIFT_PPM} ppm is a failed measurement, not a clock problem —`);
+        line('  a crystal that far out would be visibly broken. Usually a short clip or a');
+        line('  weak match left the regression too little to work with.');
+        line('');
+        for (const p of wild.slice(0, MAX_NEAR_MISSES)) {
+          const clip = input.clips.find((c) => c.id === p.clipId);
+          line(`  ${clip?.relativePath ?? p.clipId}   ${p.driftPpm?.toFixed(1)} ppm`);
+        }
+      }
+
       const overlaps = result.inconsistencies.filter((i) => i.kind === 'same-device-overlap');
       const disagreements = result.inconsistencies.filter(
         (i) => i.kind === 'offset-disagreement',
@@ -375,14 +424,33 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
         }
       }
       if (disagreements.length) {
+        // Worst first. A real report listed 1,205 of these in no particular
+        // order, mixing 22 ms — which is half a frame, and rounds away
+        // entirely in an export addressed in whole frames — with 94 minutes.
+        // Every one of the catastrophic ones was buried.
+        const frameSeconds = input.rate ? 1 / (input.rate.nominal * (input.rate.ntsc ? 1000 / 1001 : 1)) : 0.04;
+        const ranked = [...disagreements].sort(
+          (a, b) => Math.abs(b.errorSeconds) - Math.abs(a.errorSeconds),
+        );
+        const subFrame = ranked.filter((d) => Math.abs(d.errorSeconds) <= frameSeconds).length;
         heading(`MATCHES THAT DISAGREE (${disagreements.length})`);
         line('  These two clips matched each other at one offset and the timeline put');
         line('  them at another. One of the two is wrong — check them by ear.');
         line('');
-        for (const bad of disagreements.slice(0, MAX_NEAR_MISSES)) {
+        const over = disagreements.length - subFrame;
+        line(`  ${over} ${over === 1 ? 'is' : 'are'} bigger than one frame and worth looking at.`);
+        line(
+          `  ${subFrame} ${subFrame === 1 ? 'is' : 'are'} within a frame, which an export ` +
+            `addressed in whole frames rounds away.`,
+        );
+        line('');
+        line('  Worst first:');
+        for (const bad of ranked.slice(0, MAX_NEAR_MISSES)) {
+          const ms = bad.errorSeconds * 1000;
+          const human =
+            Math.abs(ms) >= 60_000 ? `  (${(Math.abs(ms) / 60_000).toFixed(1)} minutes)` : '';
           line(
-            `  ${name(bad.aId)}  vs  ${name(bad.bId)}   off by ` +
-              `${(bad.errorSeconds * 1000).toFixed(0)} ms`,
+            `  ${name(bad.aId)}  vs  ${name(bad.bId)}   off by ${ms.toFixed(0)} ms${human}`,
           );
         }
       }
@@ -532,7 +600,22 @@ function uniqueDevices(input: DiagnosticInput): string[] {
   return [...seen].sort();
 }
 
+/**
+ * Fit a value into a fixed column.
+ *
+ * Truncated from the *end*, with the ellipsis last. It used to keep the end
+ * and put the ellipsis first, which is right for a long path — you want the
+ * filename — and quietly wrong for anything else. A drift of `-1093.1 ppm`
+ * came out as `…1093.1 ppm`, so a camera running slow read as running fast:
+ * the one character that carried the meaning was the one dropped.
+ */
 function pad(value: string, width: number): string {
+  const s = value.length > width - 1 ? `${value.slice(0, width - 2)}…` : value;
+  return s.padEnd(width);
+}
+
+/** A path column, where the tail is the informative end. */
+function padPath(value: string, width: number): string {
   const s = value.length > width - 1 ? `…${value.slice(-(width - 2))}` : value;
   return s.padEnd(width);
 }

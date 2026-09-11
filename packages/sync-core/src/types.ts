@@ -76,6 +76,13 @@ export interface SyncStats {
   skippedByEnvelope: number;
   /** Pairs that were actually aligned. */
   aligned: number;
+  /**
+   * Accepted matches the solve then refused to act on, because using them
+   * would have stacked two clips from one device — which no audio can make
+   * true. A high count usually means two real devices have been grouped as
+   * one, or that the material is correlating by chance.
+   */
+  rejectedByOverlap: number;
 }
 
 export type InconsistencyKind = 'offset-disagreement' | 'same-device-overlap';

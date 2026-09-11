@@ -252,29 +252,67 @@ function assignDeviceLanes(clips: TimelineClip[], limits: TrackLimits): void {
   const spansOf = (on: TimelineClip[]) =>
     on.map((c) => ({ from: c.startSeconds, to: c.startSeconds + c.durationSeconds }));
 
+  /**
+   * Split one device's clips into runs that do not overlap each other.
+   *
+   * Normally there is exactly one run: a camera records one clip at a time, and
+   * the solve now enforces that. But a solve is not the only way clips arrive
+   * here — a hand-set device, a re-grouped project, or two real cameras a user
+   * has merged can all leave one device holding clips that overlap. Giving that
+   * device a single track then hides one behind the other, and a real export
+   * did exactly that 203 times. A clip you cannot see is indistinguishable from
+   * one that never imported, so it gets another track instead.
+   */
+  const runsOf = (on: TimelineClip[]): TimelineClip[][] => {
+    const runs: TimelineClip[][] = [];
+    for (const clip of [...on].sort((a, b) => a.startSeconds - b.startSeconds)) {
+      const span = { from: clip.startSeconds, to: clip.startSeconds + clip.durationSeconds };
+      const run = runs.find((r) => !collides(spansOf(r), span));
+      if (run) run.push(clip);
+      else runs.push([clip]);
+    }
+    return runs;
+  };
+
+  // One entry per non-overlapping run rather than per device, so a device
+  // holding clips that overlap each other cannot hide one behind another.
+  const videoRuns = devices
+    .filter((d) => d.on.some((c) => c.hasVideo))
+    .flatMap((d) =>
+      runsOf(d.on.filter((c) => c.hasVideo)).map((run, i) => ({
+        device: i === 0 ? d.device : `${d.device}#${i + 1}`,
+        clips: run,
+      })),
+    );
   const video = packLanes(
-    devices
-      .filter((d) => d.on.some((c) => c.hasVideo))
-      .map((d) => ({ device: d.device, spans: spansOf(d.on.filter((c) => c.hasVideo)), cost: 1 })),
+    videoRuns.map((r) => ({ device: r.device, spans: spansOf(r.clips), cost: 1 })),
     limits.maxVideoTracks,
   );
 
   // Audio is laid out recorder-first, so its lane 0 is A1.
-  const audio = packLanes(
-    [...devices]
-      .filter((d) => d.on.some((c) => c.hasAudio))
-      .sort((a, b) => Number(a.audioOnly) - Number(b.audioOnly) || a.start - b.start)
-      .map((d) => ({
-        device: d.device,
-        spans: spansOf(d.on.filter((c) => c.hasAudio)),
-        cost: d.channels,
+  const audioRuns = [...devices]
+    .filter((d) => d.on.some((c) => c.hasAudio))
+    .sort((a, b) => Number(a.audioOnly) - Number(b.audioOnly) || a.start - b.start)
+    .flatMap((d) =>
+      runsOf(d.on.filter((c) => c.hasAudio)).map((run, i) => ({
+        device: i === 0 ? d.device : `${d.device}#${i + 1}`,
+        clips: run,
+        channels: d.channels,
       })),
+    );
+  const audio = packLanes(
+    audioRuns.map((r) => ({ device: r.device, spans: spansOf(r.clips), cost: r.channels })),
     limits.maxAudioTracks,
   );
 
+  const videoRunOf = new Map<TimelineClip, string>();
+  for (const run of videoRuns) for (const clip of run.clips) videoRunOf.set(clip, run.device);
+  const audioRunOf = new Map<TimelineClip, string>();
+  for (const run of audioRuns) for (const clip of run.clips) audioRunOf.set(clip, run.device);
+
   for (const clip of clips) {
-    const v = video.laneOf.get(clip.trackId);
-    const a = audio.laneOf.get(clip.trackId);
+    const v = video.laneOf.get(videoRunOf.get(clip) ?? clip.trackId);
+    const a = audio.laneOf.get(audioRunOf.get(clip) ?? clip.trackId);
     // Padded so the lane ids sort in lane order, which is the order the tracks
     // are emitted in.
     if (v !== undefined) clip.videoTrackId = `V${String(v).padStart(3, '0')}`;

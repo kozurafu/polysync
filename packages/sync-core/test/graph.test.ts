@@ -25,6 +25,53 @@ function relative(result: ReturnType<typeof syncProject>, ids: string[]): number
 describe('syncProject', () => {
   const take = makeSourceAudio(140, SR, 1234);
 
+  it('refuses a match that would stack two clips from one device', () => {
+    // Reported from a real 241-clip shoot: the solve returned 69 pairs of
+    // same-device clips laid on top of each other, two overlapping by 22
+    // minutes. A camera records one clip at a time, so no audio can make that
+    // true — and the engine already trusts that rule enough to skip 20,058
+    // comparisons on it. It just was not applying it to placement.
+    //
+    // Here the same ten seconds of audio appears twice on one camera, which is
+    // exactly the shape that produces a confident, wrong match: the duplicate
+    // correlates perfectly with the recorder at a position already occupied by
+    // its twin.
+    const duplicated = asScratchAudio(slice(take, 8, 10, SR), SR);
+    const clips: AudioClip[] = [
+      clip('rec', slice(take, 0, 110, SR), 'REC'),
+      clip('camA_1', duplicated, 'CAM_A'),
+      clip('camA_2', duplicated.slice(), 'CAM_A'),
+    ];
+
+    const result = syncProject(clips, OPTS);
+
+    expect(result.stats.rejectedByOverlap).toBeGreaterThan(0);
+    // Whatever it decided, the two takes must not occupy the same time.
+    const at = new Map(result.placements.map((p) => [p.clipId, p]));
+    const one = at.get('camA_1')!;
+    const two = at.get('camA_2')!;
+    const overlap =
+      Math.min(one.startSeconds + 10, two.startSeconds + 10) -
+      Math.max(one.startSeconds, two.startSeconds);
+    expect(overlap).toBeLessThanOrEqual(0.02);
+    // And the failure must be visible rather than silent.
+    expect(result.inconsistencies.filter((i) => i.kind === 'same-device-overlap')).toEqual([]);
+  });
+
+  it('still lets clips from different devices overlap, which is the point', () => {
+    // The constraint must bite on one device only. Two cameras rolling at once
+    // is the entire thing being solved for.
+    const clips: AudioClip[] = [
+      clip('rec', slice(take, 0, 110, SR), 'REC'),
+      clip('camA', asScratchAudio(slice(take, 8, 70, SR), SR), 'CAM_A'),
+      clip('camB', asScratchAudio(slice(take, 10, 70, SR), SR), 'CAM_B'),
+    ];
+    const result = syncProject(clips, OPTS);
+    expect(result.unsyncedClipIds).toEqual([]);
+    const [, a, b] = relative(result, ['rec', 'camA', 'camB']);
+    expect(b - a).toBeCloseTo(2, 1);
+  });
+
   it('solves a three-camera plus recorder shoot', () => {
     // Ground truth: recorder rolls at 0, cameras at 8, 21.4 and 33 s.
     const clips: AudioClip[] = [

@@ -307,6 +307,89 @@ describe('buildDiagnosticReport', () => {
       expect(flat).toContain('have no folder at all');
     });
 
+    it('does not drop the minus sign off a drift figure', () => {
+      // A real report showed `…1093.1 ppm` for a camera running slow, because
+      // the column truncated from the left. Sign is the whole meaning of
+      // drift: that read as running fast.
+      const drifting: SyncResult = {
+        ...result,
+        placements: [
+          { ...result.placements[0], driftPpm: -1093.1 },
+          result.placements[1],
+        ],
+      };
+      const report = buildDiagnosticReport(input({ result: drifting }));
+      expect(report).not.toContain('…1093.1');
+      expect(report).toContain('-1093.1');
+    });
+
+    it('separates drift readings the hardware could not have produced', () => {
+      // 11,043 ppm is 1.1% — a crystal that far out would be visibly broken.
+      // It is a failed measurement, and presenting it as fact sends people
+      // after a clock problem that does not exist.
+      const drifting: SyncResult = {
+        ...result,
+        placements: [
+          { ...result.placements[0], driftPpm: 11043.8 },
+          { ...result.placements[1], driftPpm: 8.3 },
+        ],
+      };
+      const report = buildDiagnosticReport(input({ result: drifting }));
+      expect(report).toContain('DRIFT READINGS TO IGNORE (1)');
+      expect(report).toContain('11043.8 ppm');
+      // The believable one must not be swept up with it.
+      expect(report).not.toContain('8.3 ppm\n  CAM');
+    });
+
+    it('puts the worst disagreements first and says which ones round away', () => {
+      // A real report listed 1,205 in no order, mixing 22 ms — half a frame,
+      // which an export addressed in whole frames rounds away entirely — with
+      // 94 minutes. Every catastrophic one was buried.
+      const messy: SyncResult = {
+        ...result,
+        inconsistencies: [
+          { aId: 'C2_4928', bId: 'C2_4929', errorSeconds: 0.022, kind: 'offset-disagreement' as const },
+          { aId: 'C2_4928', bId: 'C2_4929', errorSeconds: -5660.322, kind: 'offset-disagreement' as const },
+          { aId: 'C2_4928', bId: 'C2_4929', errorSeconds: 0.061, kind: 'offset-disagreement' as const },
+        ],
+      };
+      const report = buildDiagnosticReport(input({ result: messy }));
+      const section = report.slice(report.indexOf('MATCHES THAT DISAGREE'));
+      // 61 ms is 1.5 frames at 25 fps, so it counts as worth looking at.
+      expect(section).toContain('2 are bigger than one frame');
+      expect(section).toContain('1 is within a frame');
+      // Worst first, and given in minutes so its size is legible.
+      const worst = section.indexOf('-5660322 ms');
+      const trivial = section.indexOf('22 ms', section.indexOf('Worst first'));
+      expect(worst).toBeGreaterThan(-1);
+      expect(worst).toBeLessThan(trivial);
+      expect(section).toContain('(94.3 minutes)');
+    });
+
+    it('says outright when a clip is too short to ever sync', () => {
+      // Twelve of eighteen unsynced clips in a real report were shorter than
+      // the minimum overlap — several under a second — and each was shown a
+      // tantalising near miss against a clip it could never have joined.
+      const report = buildDiagnosticReport(
+        input({
+          result: { ...result, unsyncedClipIds: ['C2_4929'] },
+          clips: [clip('C2_4928'), clip('C2_4929', { durationSeconds: 0.48 })],
+        }),
+      );
+      expect(report).toContain('TOO SHORT TO SYNC AT ALL (1)');
+      expect(report).toContain('0.48s');
+    });
+
+    it('reports matches the solve refused to act on', () => {
+      const refused: SyncResult = {
+        ...result,
+        stats: { ...result.stats, rejectedByOverlap: 69 },
+      };
+      expect(buildDiagnosticReport(input({ result: refused }))).toContain(
+        'rejected: would stack  69',
+      );
+    });
+
     it('includes both timings', () => {
       const report = buildDiagnosticReport(
         input({ result, timings: { ingestSeconds: 48.2, solveSeconds: 12.7 } }),
