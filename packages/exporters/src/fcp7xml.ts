@@ -1,4 +1,4 @@
-import { secondsToFrames, type FrameRate } from '@polysync/timecode';
+import { framesToTimecode, secondsToFrames, type FrameRate } from '@polysync/timecode';
 import type { TimelineClip, TimelineProject } from './types.js';
 
 /**
@@ -67,18 +67,41 @@ function rateXml(rate: FrameRate, indent: string): string {
 }
 
 /**
+ * Where one clipitem sits, once the whole sequence has been laid out.
+ *
+ * Links need this: a `<link>` addresses its partner by track index and clip
+ * index, not by id alone, so nothing can be written until every clipitem's
+ * position is known. Hence a planning pass before any XML is emitted.
+ */
+interface Slot {
+  clip: TimelineClip;
+  mediaType: 'video' | 'audio';
+  /** Audio only: which channel of the source this clipitem carries. */
+  channel?: number;
+  /** 1-based index of the track within its media type — V1, A3 and so on. */
+  trackIndex: number;
+  /** 1-based index of this clipitem along that track. */
+  clipIndex: number;
+  itemId: string;
+}
+
+/**
  * Emit one `<clipitem>`. The first time a source file appears it is defined in
  * full; afterwards it is referenced by id, because repeating the definition
  * bloats the file and confuses Premiere's importer.
+ *
+ * Element order follows a real Final Cut Pro 7 export rather than convenience.
+ * Premiere's importer is more forgiving than the DTD, but not reliably so, and
+ * matching the reference implementation costs nothing.
  */
 function clipItemXml(
-  clip: TimelineClip,
+  slot: Slot,
+  siblings: Slot[],
   project: TimelineProject,
-  mediaType: 'video' | 'audio',
   seenFiles: Set<string>,
   opts: Fcp7Options,
-  channel?: number,
 ): string {
+  const { clip, mediaType, channel } = slot;
   const rate = project.rate;
   const start = secondsToFrames(clip.startSeconds, rate);
   const duration = secondsToFrames(clip.durationSeconds, rate);
@@ -89,18 +112,36 @@ function clipItemXml(
   // produces a valid document with an invalid identifier in it.
   const slug = idSlug(clip.id);
   const fileId = `file-${slug}`;
-  const itemId = `clipitem-${slug}-${mediaType}${channel ? `-${channel}` : ''}`;
 
   const lines: string[] = [];
-  lines.push(`        <clipitem id="${escapeXml(itemId)}">`);
+  lines.push(`        <clipitem id="${escapeXml(slot.itemId)}">`);
   lines.push(`          <name>${escapeXml(clip.name)}</name>`);
-  lines.push(`          <enabled>TRUE</enabled>`);
   lines.push(`          <duration>${duration}</duration>`);
   lines.push(rateXml(rate, '          '));
-  lines.push(`          <start>${start}</start>`);
-  lines.push(`          <end>${start + duration}</end>`);
   lines.push(`          <in>${inPoint}</in>`);
   lines.push(`          <out>${inPoint + duration}</out>`);
+  lines.push(`          <start>${start}</start>`);
+  lines.push(`          <end>${start + duration}</end>`);
+  if (mediaType === 'video') {
+    lines.push(`          <pixelaspectratio>square</pixelaspectratio>`);
+    lines.push(`          <enabled>TRUE</enabled>`);
+    lines.push(`          <anamorphic>FALSE</anamorphic>`);
+    lines.push(`          <alphatype>none</alphatype>`);
+  } else {
+    lines.push(`          <enabled>TRUE</enabled>`);
+  }
+
+  // Every clipitem cut from one source file must name the same master clip, or
+  // the importer treats each as its own project item — 37 clips becoming 100
+  // unrelated items, with a stereo pair's two channels no longer recognisably
+  // the same clip.
+  lines.push(`          <masterclipid>masterclip-${escapeXml(slug)}</masterclipid>`);
+
+  if (opts.colourUnsynced && !clip.synced) {
+    lines.push(`          <labels>`);
+    lines.push(`            <label2>${escapeXml(opts.unsyncedLabel)}</label2>`);
+    lines.push(`          </labels>`);
+  }
 
   if (seenFiles.has(fileId)) {
     lines.push(`          <file id="${escapeXml(fileId)}"/>`);
@@ -111,9 +152,13 @@ function clipItemXml(
     lines.push(`            <pathurl>${escapeXml(pathToFileUrl(clip.path))}</pathurl>`);
     lines.push(rateXml(rate, '            '));
     lines.push(`            <duration>${duration}</duration>`);
+    if (clip.timecodeSeconds !== undefined) {
+      lines.push(timecodeXml(clip.timecodeSeconds, rate, '            '));
+    }
     lines.push(`            <media>`);
     if (clip.hasVideo) {
       lines.push(`              <video>`);
+      lines.push(`                <duration>${duration}</duration>`);
       lines.push(`                <samplecharacteristics>`);
       if (clip.width && clip.height) {
         lines.push(`                  <width>${clip.width}</width>`);
@@ -129,6 +174,10 @@ function clipItemXml(
     }
     if (clip.hasAudio) {
       lines.push(`              <audio>`);
+      lines.push(`                <samplecharacteristics>`);
+      lines.push(`                  <depth>16</depth>`);
+      lines.push(`                  <samplerate>48000</samplerate>`);
+      lines.push(`                </samplecharacteristics>`);
       lines.push(`                <channelcount>${clip.audioChannels ?? 2}</channelcount>`);
       lines.push(`              </audio>`);
     }
@@ -136,26 +185,67 @@ function clipItemXml(
     lines.push(`          </file>`);
   }
 
+  lines.push(`          <sourcetrack>`);
+  lines.push(`            <mediatype>${mediaType}</mediatype>`);
+  // Audio names the source channel it takes; video does not, matching FCP.
   if (mediaType === 'audio' && channel != null) {
-    lines.push(`          <sourcetrack>`);
-    lines.push(`            <mediatype>audio</mediatype>`);
     lines.push(`            <trackindex>${channel}</trackindex>`);
-    lines.push(`          </sourcetrack>`);
-  } else if (mediaType === 'video') {
-    lines.push(`          <sourcetrack>`);
-    lines.push(`            <mediatype>video</mediatype>`);
-    lines.push(`            <trackindex>1</trackindex>`);
-    lines.push(`          </sourcetrack>`);
   }
+  lines.push(`          </sourcetrack>`);
 
-  if (opts.colourUnsynced && !clip.synced) {
-    lines.push(`          <labels>`);
-    lines.push(`            <label2>${escapeXml(opts.unsyncedLabel)}</label2>`);
-    lines.push(`          </labels>`);
+  // Tie this clipitem to the others cut from the same source, so Premiere
+  // treats a clip's picture and its two audio channels as one linked item.
+  // Without these, nudging the video leaves its audio behind and the timeline
+  // is no longer the thing the solve produced. Each member lists the whole
+  // group, itself included — that is the convention FCP writes.
+  if (siblings.length > 1) {
+    for (const sibling of siblings) {
+      lines.push(`          <link>`);
+      lines.push(`            <linkclipref>${escapeXml(sibling.itemId)}</linkclipref>`);
+      lines.push(`            <mediatype>${sibling.mediaType}</mediatype>`);
+      lines.push(`            <trackindex>${sibling.trackIndex}</trackindex>`);
+      lines.push(`            <clipindex>${sibling.clipIndex}</clipindex>`);
+      lines.push(`          </link>`);
+    }
   }
 
   lines.push(`        </clipitem>`);
   return lines.join('\n');
+}
+
+/** A `<timecode>` block, as both the sequence and each file want one. */
+function timecodeXml(seconds: number, rate: FrameRate, indent: string): string {
+  const frame = secondsToFrames(seconds, rate);
+  return [
+    `${indent}<timecode>`,
+    rateXml(rate, `${indent}  `),
+    `${indent}  <string>${framesToTimecode(frame, rate)}</string>`,
+    `${indent}  <frame>${frame}</frame>`,
+    `${indent}  <displayformat>${rate.dropFrame ? 'DF' : 'NDF'}</displayformat>`,
+    `${indent}</timecode>`,
+  ].join('\n');
+}
+
+/**
+ * A stable UUID for the sequence, derived from its name.
+ *
+ * Premiere wants one, and deriving it rather than randomising means exporting
+ * the same project twice produces the same document — which makes the output
+ * diffable and keeps re-imports from multiplying sequences.
+ */
+function sequenceUuid(name: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x1000193;
+  for (let i = 0; i < name.length; i++) {
+    h1 = Math.imul(h1 ^ name.charCodeAt(i), 0x01000193) >>> 0;
+    h2 = Math.imul(h2 + name.charCodeAt(i), 0x85ebca6b) >>> 0;
+  }
+  const hex = (n: number) => n.toString(16).padStart(8, '0');
+  const a = hex(h1);
+  const b = hex(h2);
+  const c = hex((h1 ^ h2) >>> 0);
+  const d = hex(Math.imul(h1 + h2, 0xc2b2ae35) >>> 0);
+  return `${a}-${b.slice(0, 4)}-4${b.slice(5)}-a${c.slice(1, 4)}-${c.slice(4)}${d}`;
 }
 
 /**
@@ -249,14 +339,86 @@ export function exportFcp7Xml(
   const videoTracks = trackIds(project.clips.filter((c) => c.hasVideo), videoTrackOf);
   const audioTracks = trackIds(project.clips.filter((c) => c.hasAudio), audioTrackOf);
 
+  // ---- plan first, emit second --------------------------------------------
+  // A `<link>` addresses its partners by track and clip index, so every
+  // clipitem's position has to be known before the first one can be written.
+  const slots: Slot[] = [];
+  const onVideoTrack = (trackId: string) =>
+    project.clips
+      .filter((c) => videoTrackOf(c) === trackId && c.hasVideo)
+      .sort((a, b) => a.startSeconds - b.startSeconds);
+
+  videoTracks.forEach((trackId, t) => {
+    onVideoTrack(trackId).forEach((clip, i) => {
+      slots.push({
+        clip,
+        mediaType: 'video',
+        trackIndex: t + 1,
+        clipIndex: i + 1,
+        itemId: `clipitem-${idSlug(clip.id)}-video`,
+      });
+    });
+  });
+
+  // Audio track numbering runs across every channel of every track, because
+  // that is what the NLE counts: A1, A2, A3 are timeline tracks, and a stereo
+  // source occupies two of them.
+  const audioLanes: Array<{ trackId: string; channel: number; clips: TimelineClip[] }> = [];
+  for (const trackId of audioTracks) {
+    const clipsOnTrack = project.clips
+      .filter((c) => audioTrackOf(c) === trackId && c.hasAudio)
+      .sort((a, b) => a.startSeconds - b.startSeconds);
+    const channels = Math.max(1, ...clipsOnTrack.map((c) => c.audioChannels ?? 2));
+    for (let channel = 1; channel <= channels; channel++) {
+      // A mono source has nothing on channel 2; asking for it makes Premiere
+      // drop the whole clipitem.
+      audioLanes.push({
+        trackId,
+        channel,
+        clips: clipsOnTrack.filter((c) => channel <= (c.audioChannels ?? 2)),
+      });
+    }
+  }
+  audioLanes.forEach((lane, t) => {
+    lane.clips.forEach((clip, i) => {
+      slots.push({
+        clip,
+        mediaType: 'audio',
+        channel: lane.channel,
+        trackIndex: t + 1,
+        clipIndex: i + 1,
+        itemId: `clipitem-${idSlug(clip.id)}-audio-${lane.channel}`,
+      });
+    });
+  });
+
+  // Link groups: one per source clip, holding its picture and every channel.
+  const groups = new Map<string, Slot[]>();
+  for (const slot of slots) {
+    const list = groups.get(slot.clip.id);
+    if (list) list.push(slot);
+    else groups.set(slot.clip.id, [slot]);
+  }
+  const emit = (slot: Slot) =>
+    clipItemXml(slot, groups.get(slot.clip.id) ?? [slot], project, seenFiles, opts);
+
+  // ---- emit ----------------------------------------------------------------
   const lines: string[] = [];
   lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
   lines.push(`<!DOCTYPE xmeml>`);
   lines.push(`<xmeml version="5">`);
   lines.push(`  <sequence id="sequence-1">`);
+  lines.push(`    <uuid>${sequenceUuid(project.name)}</uuid>`);
+  lines.push(`    <updatebehavior>add</updatebehavior>`);
   lines.push(`    <name>${escapeXml(project.name)}</name>`);
   lines.push(`    <duration>${end}</duration>`);
   lines.push(rateXml(rate, '    '));
+  // Where the sequence starts. Left out, the importer picks its own start and
+  // every clip's position is read against a different origin than the one the
+  // solve measured.
+  lines.push(timecodeXml(0, rate, '    '));
+  lines.push(`    <in>-1</in>`);
+  lines.push(`    <out>-1</out>`);
   lines.push(`    <media>`);
 
   lines.push(`      <video>`);
@@ -273,19 +435,20 @@ export function exportFcp7Xml(
     lines.push(`            <height>${frame.height}</height>`);
     lines.push(`            <pixelaspectratio>square</pixelaspectratio>`);
     lines.push(`            <fielddominance>none</fielddominance>`);
+    lines.push(`            <colordepth>24</colordepth>`);
     lines.push(`          </samplecharacteristics>`);
     lines.push(`        </format>`);
   }
-  for (const trackId of videoTracks) {
+  videoTracks.forEach((trackId, t) => {
     lines.push(`        <track>`);
     lines.push(`          <!-- ${escapeXml(trackLabel(project.clips, trackId, videoTrackOf))} -->`);
-    for (const clip of project.clips.filter((c) => videoTrackOf(c) === trackId && c.hasVideo)) {
-      lines.push(clipItemXml(clip, project, 'video', seenFiles, opts));
+    for (const slot of slots.filter((s) => s.mediaType === 'video' && s.trackIndex === t + 1)) {
+      lines.push(emit(slot));
     }
     lines.push(`          <enabled>TRUE</enabled>`);
     lines.push(`          <locked>FALSE</locked>`);
     lines.push(`        </track>`);
-  }
+  });
   lines.push(`      </video>`);
 
   // Every audio source gets its own track. PluralEyes used only the topmost
@@ -298,35 +461,51 @@ export function exportFcp7Xml(
   // brings in half the audio at best and, on a track where clips overlap,
   // nothing at all.
   lines.push(`      <audio>`);
+  lines.push(`        <numOutputChannels>2</numOutputChannels>`);
   lines.push(`        <format>`);
   lines.push(`          <samplecharacteristics>`);
   lines.push(`            <depth>16</depth>`);
   lines.push(`            <samplerate>48000</samplerate>`);
   lines.push(`          </samplecharacteristics>`);
   lines.push(`        </format>`);
-  for (const trackId of audioTracks) {
-    const clipsOnTrack = project.clips.filter((c) => audioTrackOf(c) === trackId && c.hasAudio);
-    const channels = Math.max(1, ...clipsOnTrack.map((c) => c.audioChannels ?? 2));
-    for (let channel = 1; channel <= channels; channel++) {
-      lines.push(`        <track>`);
-      lines.push(
-        `          <!-- ${escapeXml(trackLabel(project.clips, trackId, audioTrackOf))} ch${channel} -->`,
-      );
-      for (const clip of clipsOnTrack) {
-        // A mono source has nothing on channel 2; asking for it makes Premiere
-        // drop the whole clipitem.
-        if (channel > (clip.audioChannels ?? 2)) continue;
-        lines.push(clipItemXml(clip, project, 'audio', seenFiles, opts, channel));
-      }
-      lines.push(`          <enabled>TRUE</enabled>`);
-      lines.push(`          <locked>FALSE</locked>`);
-      lines.push(`        </track>`);
+  // The master bus. Without it the importer has no output to route tracks to,
+  // and an audio track with nowhere to go is where imported audio quietly
+  // stops appearing.
+  lines.push(`        <outputs>`);
+  lines.push(`          <group>`);
+  lines.push(`            <index>1</index>`);
+  lines.push(`            <numchannels>2</numchannels>`);
+  lines.push(`            <downmix>0</downmix>`);
+  lines.push(`            <channel>`);
+  lines.push(`              <index>1</index>`);
+  lines.push(`            </channel>`);
+  lines.push(`            <channel>`);
+  lines.push(`              <index>2</index>`);
+  lines.push(`            </channel>`);
+  lines.push(`          </group>`);
+  lines.push(`        </outputs>`);
+  audioLanes.forEach((lane, t) => {
+    lines.push(`        <track>`);
+    lines.push(
+      `          <!-- ${escapeXml(trackLabel(project.clips, lane.trackId, audioTrackOf))} ch${lane.channel} -->`,
+    );
+    for (const slot of slots.filter((s) => s.mediaType === 'audio' && s.trackIndex === t + 1)) {
+      lines.push(emit(slot));
     }
-  }
+    lines.push(`          <enabled>TRUE</enabled>`);
+    lines.push(`          <locked>FALSE</locked>`);
+    // Which side of the master this track feeds — taken from the *source*
+    // channel, not the track's position. Alternating by position looks right
+    // until an odd number of tracks precedes a stereo pair: a single mono
+    // recorder on A1 is enough to shift every pair after it and swap left for
+    // right on all of them.
+    lines.push(`          <outputchannelindex>${((lane.channel - 1) % 2) + 1}</outputchannelindex>`);
+    lines.push(`        </track>`);
+  });
   lines.push(`      </audio>`);
 
   lines.push(`    </media>`);
   lines.push(`  </sequence>`);
   lines.push(`</xmeml>`);
-  return lines.join('\n') + '\n';
+  return lines.join('\n');
 }

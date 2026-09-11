@@ -318,3 +318,94 @@ describe('sequence format', () => {
     ).toBeUndefined();
   });
 });
+
+describe('what Premiere actually needs', () => {
+  // Reported 2026-09-11: the sequence contained every clip at the right time
+  // and still did not come in correctly. Diffing the output against a real
+  // Final Cut Pro 7 export showed four structural elements missing — none of
+  // which affect whether the XML parses, all of which decide what the importer
+  // builds from it.
+  const xml = exportFcp7Xml(project);
+
+  it('gives every clipitem a masterclipid, shared across its channels', () => {
+    // Without this the importer treats each clipitem as its own project item,
+    // so one stereo clip arrives as three unrelated items — picture, left and
+    // right — with nothing marking them as the same piece of media.
+    const items = [...xml.matchAll(/<clipitem id="([^"]+)">([\s\S]*?)<\/clipitem>/g)];
+    expect(items.length).toBeGreaterThan(0);
+    for (const [, id, body] of items) {
+      expect(body, id).toMatch(/<masterclipid>[^<]+<\/masterclipid>/);
+    }
+    const masterOf = (id: string) =>
+      /<masterclipid>([^<]+)<\/masterclipid>/.exec(
+        items.find(([, itemId]) => itemId === id)?.[2] ?? '',
+      )?.[1];
+    expect(masterOf('clipitem-camA1-audio-1')).toBe(masterOf('clipitem-camA1-audio-2'));
+    expect(masterOf('clipitem-camA1-video')).toBe(masterOf('clipitem-camA1-audio-1'));
+  });
+
+  it('links a clip’s picture to its audio channels', () => {
+    // Unlinked, nudging the video in the timeline leaves its audio behind and
+    // the sequence stops being the thing the solve produced.
+    const body = /<clipitem id="clipitem-camA1-video">([\s\S]*?)<\/clipitem>/.exec(xml)?.[1] ?? '';
+    const refs = [...body.matchAll(/<linkclipref>([^<]+)<\/linkclipref>/g)].map((m) => m[1]);
+    // FCP's convention: every member lists the whole group, itself included.
+    expect(refs).toContain('clipitem-camA1-video');
+    expect(refs).toContain('clipitem-camA1-audio-1');
+    expect(refs).toContain('clipitem-camA1-audio-2');
+  });
+
+  it('addresses each link by track and clip index, not id alone', () => {
+    const link = /<link>([\s\S]*?)<\/link>/.exec(xml)?.[1] ?? '';
+    expect(link).toMatch(/<mediatype>(video|audio)<\/mediatype>/);
+    expect(link).toMatch(/<trackindex>\d+<\/trackindex>/);
+    expect(link).toMatch(/<clipindex>\d+<\/clipindex>/);
+  });
+
+  it('declares a master audio bus for the tracks to feed', () => {
+    // An audio track with no output to route to is where imported audio
+    // quietly stops appearing.
+    const outputs = /<outputs>([\s\S]*?)<\/outputs>/.exec(xml)?.[1] ?? '';
+    expect(outputs).toContain('<numchannels>2</numchannels>');
+    expect(outputs).toContain('<downmix>0</downmix>');
+    expect((outputs.match(/<channel>/g) ?? []).length).toBe(2);
+  });
+
+  it('routes each audio track by its source channel, never by position', () => {
+    // Alternating by track position looks right until an odd number of tracks
+    // precedes a stereo pair — one mono recorder on A1 is enough to shift
+    // every pair after it and swap left for right on all of them.
+    const tracks = xml.split('<track>').slice(1);
+    for (const track of tracks) {
+      const channel = /<!-- .*? ch(\d+) -->/.exec(track)?.[1];
+      const output = /<outputchannelindex>(\d+)<\/outputchannelindex>/.exec(track)?.[1];
+      if (!channel || !output) continue;
+      expect(output, `ch${channel}`).toBe(String(((Number(channel) - 1) % 2) + 1));
+    }
+  });
+
+  it('states where the sequence starts', () => {
+    // Left out, the importer picks its own origin and every clip's position is
+    // read against a different zero than the one the solve measured.
+    const timecode = /<timecode>([\s\S]*?)<\/timecode>/.exec(xml)?.[1] ?? '';
+    expect(timecode).toContain('<string>00:00:00:00</string>');
+    expect(timecode).toContain('<frame>0</frame>');
+    expect(timecode).toContain('<displayformat>NDF</displayformat>');
+  });
+
+  it('carries a stable sequence uuid', () => {
+    const uuid = /<uuid>([^<]+)<\/uuid>/.exec(xml)?.[1];
+    expect(uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    // Re-exporting the same project must not invent a new one, or every
+    // re-import multiplies sequences.
+    expect(/<uuid>([^<]+)<\/uuid>/.exec(exportFcp7Xml(project))?.[1]).toBe(uuid);
+  });
+
+  it('keeps the source timecode a recorder stamped', () => {
+    const withTc: TimelineProject = {
+      ...project,
+      clips: [{ ...project.clips[0], timecodeSeconds: 14 * 3600 + 4 * 60 + 48 }],
+    };
+    expect(exportFcp7Xml(withTc)).toContain('<string>14:04:48:00</string>');
+  });
+});

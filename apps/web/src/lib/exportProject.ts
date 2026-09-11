@@ -213,6 +213,7 @@ export function buildTimeline(input: ExportInput): TimelineProject {
       height: clip?.probe.height,
       synced: placement.synced,
       reel: device,
+      timecodeSeconds: clip?.timecodeSeconds,
     };
   });
 

@@ -40,6 +40,14 @@ export interface TimelineClip {
   synced: boolean;
   /** Reel name for EDL. Sanitised to <= 8 characters on export. */
   reel?: string;
+  /**
+   * Source timecode, seconds since midnight, when the file carried one.
+   *
+   * Written into the file's `<timecode>` so the NLE shows the same source
+   * timecode the camera or recorder stamped, rather than starting every clip
+   * at zero.
+   */
+  timecodeSeconds?: number;
 }
 
 export interface TimelineProject {
