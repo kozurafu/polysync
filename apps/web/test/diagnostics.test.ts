@@ -390,6 +390,55 @@ describe('buildDiagnosticReport', () => {
       );
     });
 
+    it('shows each clip’s frame rate and frame size', () => {
+      // Captured all along, never shown. Its absence made one question
+      // unanswerable from a report — what rate is this footage? — which is the
+      // first thing to check when lengths look wrong on the timeline.
+      const withPicture = clip('C2_4928', { frameRate: 25 });
+      const report = buildDiagnosticReport(
+        input({
+          clips: [{ ...withPicture, probe: { ...withPicture.probe, width: 3840, height: 2160 } }],
+        }),
+      );
+      expect(report).toContain('FPS');
+      expect(report).toContain('3840x2160');
+      expect(report).toContain('25');
+    });
+
+    it('does not put a frame rate on a file that has no frames', () => {
+      // A WAV carries the rate its timecode is counted in. Printing that under
+      // FPS invites a comparison with the sequence that means nothing.
+      const wav = clip('MIX', { frameRate: 25 });
+      const report = buildDiagnosticReport(
+        input({
+          clips: [{ ...wav, probe: { ...wav.probe, hasVideo: false } }],
+        }),
+      );
+      expect(report).not.toContain('fps sequence');
+    });
+
+    it('warns when footage does not match the sequence rate', () => {
+      const report = buildDiagnosticReport(
+        input({ clips: [clip('a', { frameRate: 50 }), clip('b', { frameRate: 50 })] }),
+      );
+      expect(report).toContain('50 fps footage in a 25 fps sequence');
+    });
+
+    it('says nothing when the rates agree', () => {
+      const report = buildDiagnosticReport(
+        input({ clips: [clip('a', { frameRate: 25 }), clip('b', { frameRate: 25 })] }),
+      );
+      expect(report).not.toContain('fps sequence');
+      expect(report).not.toContain('mixed frame rates');
+    });
+
+    it('flags mixed frame rates in one project', () => {
+      const report = buildDiagnosticReport(
+        input({ clips: [clip('a', { frameRate: 25 }), clip('b', { frameRate: 50 })] }),
+      );
+      expect(report).toContain('mixed frame rates');
+    });
+
     it('includes both timings', () => {
       const report = buildDiagnosticReport(
         input({ result, timings: { ingestSeconds: 48.2, solveSeconds: 12.7 } }),

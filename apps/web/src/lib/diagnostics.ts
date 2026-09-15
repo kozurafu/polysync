@@ -25,7 +25,7 @@
 import type { GroupResult } from '@polysync/media-io';
 import { exportFcp7Xml, sequenceFrameSize } from '@polysync/exporters';
 import type { FrameRate } from '@polysync/timecode';
-import { buildTimeline, type TrackLayout } from './exportProject.ts';
+import { DEFAULT_TRACK_LIMITS, buildTimeline, type TrackLayout } from './exportProject.ts';
 import type { PairAlignment, SyncResult } from '@polysync/sync-core';
 import type { IngestFailure, IngestedClip } from './engine.ts';
 
@@ -201,7 +201,8 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
         pad('CH', 4) +
         pad('CODEC', 14) +
         pad('TIMECODE', 14) +
-        pad('V', 3) +
+        pad('FPS', 8) +
+        pad('SIZE', 11) +
         'WORKING',
     );
     for (const clip of input.clips.slice(0, MAX_CLIP_ROWS)) {
@@ -218,7 +219,27 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
               : '—',
             14,
           ) +
-          pad(clip.probe.hasVideo ? 'y' : 'n', 3) +
+          // Frame rate was captured all along and never shown, and its absence
+          // made one question unanswerable from a report: what rate is this
+          // footage? The sequence is built at whatever the user picked, and a
+          // clip that disagrees is a live suspect whenever lengths look wrong
+          // on the timeline.
+          // Only a clip with picture has a frame rate. A WAV carries a rate too
+          // — the one its timecode is counted in — and printing that under FPS
+          // invites the reader to compare it with the sequence, which means
+          // nothing for a file that has no frames.
+          pad(
+            clip.probe.hasVideo && clip.frameRate
+              ? clip.frameRate.toFixed(3).replace(/\.?0+$/, '')
+              : '—',
+            8,
+          ) +
+          pad(
+            clip.probe.width && clip.probe.height
+              ? `${clip.probe.width}x${clip.probe.height}`
+              : (clip.probe.hasVideo ? 'video' : 'audio'),
+            11,
+          ) +
           String(clip.sampleRate),
       );
     }
@@ -228,6 +249,35 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
   }
 
   // ---------------------------------------------------------------- skipped
+  {
+    // A clip whose own rate differs from the sequence is the first thing to
+    // check when durations look wrong in the NLE, because the export addresses
+    // time in the sequence's frames.
+    const rates = new Map<number, number>();
+    for (const clip of input.clips) {
+      if (!clip.probe.hasVideo || clip.frameRate === undefined) continue;
+      const key = Math.round(clip.frameRate * 1000) / 1000;
+      rates.set(key, (rates.get(key) ?? 0) + 1);
+    }
+    if (rates.size > 1) {
+      line('');
+      line(
+        `  ! mixed frame rates: ${[...rates.entries()].map(([r, n]) => `${r} fps x${n}`).join(', ')}`,
+      );
+    }
+    const sequenceRate = input.rate ? input.rate.nominal / (input.rate.ntsc ? 1.001 : 1) : undefined;
+    if (sequenceRate !== undefined) {
+      const off = [...rates.keys()].filter((r) => Math.abs(r - sequenceRate) > 0.01);
+      if (off.length) {
+        line('');
+        line(
+          `  ! ${off.join(', ')} fps footage in a ${sequenceRate.toFixed(3).replace(/\.?0+$/, '')} fps sequence.`,
+        );
+        line('    Set the sequence rate to match, or the NLE will resample every clip to fit.');
+      }
+    }
+  }
+
   heading(`SKIPPED (${input.failures.length})`);
   if (input.failures.length === 0) line('  none');
   for (const failure of input.failures) {
@@ -538,6 +588,25 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
         for (let i = 1; i < spans.length; i++) if (spans[i].from < spans[i - 1].to) hidden++;
       }
       line(`clips hidden       ${hidden === 0 ? 'none' : `${hidden} — a clip sits behind another`}`);
+
+      // Never hiding a clip is the right trade, but a timeline this tall is a
+      // symptom rather than a result: it means a device holds clips that
+      // overlap each other, which a camera cannot produce. Say so, because the
+      // track count is the visible effect and the solve is the actual problem.
+      const budget = DEFAULT_TRACK_LIMITS;
+      if (
+        videoTracks.length > budget.maxVideoTracks ||
+        audioTracks.length > budget.maxAudioTracks
+      ) {
+        line('');
+        line(
+          `  ! ${videoTracks.length} video and ${audioTracks.length} audio tracks, past the ` +
+            `${budget.maxVideoTracks}/${budget.maxAudioTracks} this layout aims for.`,
+        );
+        line('    Each extra track exists because a device holds clips that overlap each other,');
+        line('    which a camera cannot do — they get their own track rather than hiding one');
+        line('    behind another. The tall timeline is the symptom; the placements are the bug.');
+      }
     } catch (error) {
       line(`  export failed to build: ${error instanceof Error ? error.message : String(error)}`);
     }
