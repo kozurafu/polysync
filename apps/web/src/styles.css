@@ -398,5 +398,6 @@ footer {
   font-weight: 600;
 }
 .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.coremode.compact { gap: 10px; }
 .coremode-actual { font-size: 13px; color: var(--muted); }
 .coremode-actual b { color: var(--ink); font-variant-numeric: tabular-nums; }

@@ -318,6 +318,43 @@ export function App() {
         ? `Everything is on one device (${devices[0]}). Syncing needs two — set the right device per clip below.`
         : undefined;
 
+  /**
+   * The core-count control.
+   *
+   * Rendered before anything is loaded as well as after, because it is a
+   * decision about how the project will be processed — not a repair for a
+   * project that already has been. Shown below the drop target on an empty
+   * page it reads as a setting; shown only after a solve it reads as
+   * "something went wrong, try this", which is the wrong story.
+   */
+  const coreControl = (compact: boolean) => (
+    <div className={`coremode${compact ? ' compact' : ''}`}>
+      <div className="seg" role="group" aria-label="How many cores to use">
+        <button
+          type="button"
+          className={coreMode === 'all' ? 'on' : ''}
+          aria-pressed={coreMode === 'all'}
+          onClick={() => chooseCoreMode('all')}
+        >
+          Use all cores
+        </button>
+        <button
+          type="button"
+          className={coreMode === 'single' ? 'on' : ''}
+          aria-pressed={coreMode === 'single'}
+          onClick={() => chooseCoreMode('single')}
+        >
+          Single core
+        </button>
+      </div>
+      {!compact && poolPlan && (
+        <span className="coremode-actual">
+          Last run used <b>{poolPlan.size === 1 ? '1 core' : `${poolPlan.size} cores`}</b>
+        </span>
+      )}
+    </div>
+  );
+
   return (
     <div
       className="app"
@@ -443,6 +480,20 @@ export function App() {
           </div>
         )}
 
+        {clips.length === 0 && !busy && (
+          <section className="panel">
+            <h2>Processing</h2>
+            <div className="panel-body">
+              {coreControl(true)}
+              <p className="help" style={{ margin: '10px 0 0', maxWidth: '68ch' }}>
+                Matching clips is the slow part, and it can be split across your processor's
+                cores. <em>Use all cores</em> is faster and is the normal setting. Change this
+                before you synchronize.
+              </p>
+            </div>
+          </section>
+        )}
+
         {busy && (
           <section className="panel">
             <h2>{phase === 'syncing' ? 'Synchronizing' : 'Reading media'}</h2>
@@ -490,6 +541,28 @@ export function App() {
             <h3>Nothing to sync yet</h3>
             <p style={{ margin: 0 }}>{syncBlockedReason}</p>
           </div>
+        )}
+
+        {clips.length > 0 && !busy && (
+          <section className="panel">
+            <h2>Processing</h2>
+            <div className="panel-body">
+              {coreControl(false)}
+              <p className="help" style={{ margin: '10px 0 0', maxWidth: '68ch' }}>
+                Matching clips is the slow part, and it can be split across your processor's
+                cores. <em>Use all cores</em> is faster and is the normal setting.{' '}
+                <em>Single core</em> does exactly the same work one piece at a time — slower, but
+                it is the oldest and most-tested path through the app. If a sync ever comes out
+                wrong, switch to a single core and synchronize again: the answer should be
+                identical, and if it is not, that is worth telling us about.
+              </p>
+              {coreMode === 'all' && poolPlan?.size === 1 && !poolPlan.forced && (
+                <p className="help" style={{ margin: '8px 0 0', maxWidth: '68ch' }}>
+                  This project ran on one core anyway — {poolPlan.reason}.
+                </p>
+              )}
+            </div>
+          </section>
         )}
 
         {grouping && !busy && (
@@ -603,52 +676,6 @@ export function App() {
           </div>
         )}
 
-        {clips.length > 0 && !busy && (
-          <section className="panel">
-            <h2>Processing</h2>
-            <div className="panel-body">
-              <div className="coremode">
-                <div className="seg" role="group" aria-label="How many cores to use">
-                  <button
-                    type="button"
-                    className={coreMode === 'all' ? 'on' : ''}
-                    aria-pressed={coreMode === 'all'}
-                    onClick={() => chooseCoreMode('all')}
-                  >
-                    Use all cores
-                  </button>
-                  <button
-                    type="button"
-                    className={coreMode === 'single' ? 'on' : ''}
-                    aria-pressed={coreMode === 'single'}
-                    onClick={() => chooseCoreMode('single')}
-                  >
-                    Single core
-                  </button>
-                </div>
-                {poolPlan && (
-                  <span className="coremode-actual">
-                    Last run used{' '}
-                    <b>{poolPlan.size === 1 ? '1 core' : `${poolPlan.size} cores`}</b>
-                  </span>
-                )}
-              </div>
-              <p className="help" style={{ margin: '10px 0 0', maxWidth: '68ch' }}>
-                Matching clips is the slow part, and it can be split across your processor's
-                cores. <em>Use all cores</em> is faster and is the normal setting.{' '}
-                <em>Single core</em> does exactly the same work one piece at a time — slower, but
-                it is the oldest and most-tested path through the app. If a sync ever comes out
-                wrong, run it again on a single core: the answer should be identical, and if it
-                is not, that is worth telling us about.
-              </p>
-              {coreMode === 'all' && poolPlan?.size === 1 && !poolPlan.forced && (
-                <p className="help" style={{ margin: '8px 0 0', maxWidth: '68ch' }}>
-                  This project ran on one core anyway — {poolPlan.reason}.
-                </p>
-              )}
-            </div>
-          </section>
-        )}
 
         {clips.length > 0 && !busy && (
           <section className="panel">

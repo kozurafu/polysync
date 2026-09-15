@@ -269,8 +269,8 @@ async function checkXmlExport(
  * does? A toggle that looks right and changes nothing is worse than none.
  */
 async function checkCoreToggle(page: import('playwright').Page): Promise<boolean> {
-  const single = page.locator('.seg button:has-text("Single core")');
-  const all = page.locator('.seg button:has-text("Use all cores")');
+  const single = page.locator('.seg button:has-text("Single core")').first();
+  const all = page.locator('.seg button:has-text("Use all cores")').first();
   if ((await single.count()) === 0) {
     console.error('FAIL: no core-count control on the page');
     return false;
@@ -283,15 +283,58 @@ async function checkCoreToggle(page: import('playwright').Page): Promise<boolean
   }
 
   // Re-run and read what the solve actually did, not what the button says.
+  //
+  // Waiting on `.pill` here would be a lie: it is already on the page from the
+  // first solve, so the wait returns at once and the report read afterwards is
+  // the *previous* one. That produced a passing run and a failing run from the
+  // same code. Wait for the Synchronize button to go busy and come back, which
+  // is the actual signal that a new solve happened.
+  const syncing = () =>
+    page.waitForFunction(
+      (wantDisabled) => {
+        const button = [...document.querySelectorAll('button')].find((b) =>
+          /Synchronize/.test(b.textContent ?? ''),
+        ) as HTMLButtonElement | undefined;
+        return !!button && button.disabled === wantDisabled;
+      },
+      true,
+      { timeout: 60_000 },
+    );
+
   await page.click('button:has-text("Synchronize")');
-  await page.waitForSelector('.pill', { timeout: 300_000 });
+  await syncing();
+  await page.waitForFunction(
+    () => {
+      const button = [...document.querySelectorAll('button')].find((b) =>
+        /Synchronize/.test(b.textContent ?? ''),
+      ) as HTMLButtonElement | undefined;
+      return !!button && !button.disabled;
+    },
+    null,
+    { timeout: 300_000 },
+  );
+
+  // Same trap as `.pill` above, and I fell into it twice: the report element is
+  // already on the page from the earlier dump, so waiting for the *selector*
+  // returns at once and hands back the previous run's text. Wait for the
+  // content to actually change instead.
+  const before = (await page.locator('pre.report').textContent()) ?? '';
   await page.click('button:has-text("Diagnostics")');
-  await page.waitForSelector('pre.report', { timeout: 30_000 });
+  await page.waitForFunction(
+    (previous) => (document.querySelector('pre.report')?.textContent ?? '') !== previous,
+    before,
+    { timeout: 60_000 },
+  );
   const forced = (await page.locator('pre.report').textContent()) ?? '';
   const usedOne = /align workers\s+1 \(single-threaded\)/.test(forced);
   console.log(`Single core forces one worker: ${usedOne ? 'yes' : 'NO'}`);
   if (!usedOne) {
     console.error('FAIL: the control did not change the solve');
+    for (const line of forced.split('\n')) {
+      if (/align workers|core setting|solve |of which aligning|clips synced/.test(line)) {
+        console.error(`      ${line.trim()}`);
+      }
+    }
     return false;
   }
 
@@ -344,6 +387,17 @@ async function main(): Promise<void> {
     const query = WORKERS ? `?workers=${WORKERS}` : '';
     await page.goto(`http://localhost:${PORT}${BASE}/${query}`, { waitUntil: 'networkidle' });
     console.log(`Loaded the app from http://localhost:${PORT}${BASE}/`);
+
+    // The core-count control must be reachable before any media is loaded: it
+    // decides how the project will be processed, so it cannot only appear once
+    // the processing has already happened.
+    const onEmpty = await page.locator('.seg button').count();
+    console.log(`Core control on the empty page: ${onEmpty > 0 ? 'yes' : 'NO'}`);
+    if (onEmpty === 0) {
+      console.error('FAIL: the setting is only reachable after a project is loaded');
+      failed = true;
+    }
+    await page.screenshot({ path: 'apps/web/smoke-empty.png', fullPage: true });
 
     // Picking checks first, on an empty project, so they neither depend on nor
     // disturb the folder flow below.
