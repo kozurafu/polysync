@@ -356,3 +356,11 @@ footer {
   border-radius: 4px;
   background: var(--panel);
 }
+
+/* The build stamp sits beside the privacy note: present when looked for,
+   invisible otherwise. Answering "am I on the latest version?" should not
+   require comparing behaviour against expectations. */
+.build-id {
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}

@@ -27,7 +27,7 @@ import {
   guessFrameRate,
   type TrackLayout,
 } from './lib/exportProject.ts';
-import { buildDiagnosticReport, probeEnvironment } from './lib/diagnostics.ts';
+import { buildDiagnosticReport, buildId, probeEnvironment } from './lib/diagnostics.ts';
 import { Timeline, formatClock } from './components/Timeline.tsx';
 
 type Phase = 'idle' | 'ingesting' | 'ready' | 'syncing' | 'solved';
@@ -325,6 +325,11 @@ export function App() {
       <header className="topbar">
         <div className="brand">Poly<span>sync</span></div>
         <div className="privacy">LOCAL ONLY · NOTHING IS UPLOADED</div>
+        {/* Visible so "am I on the latest version?" is answerable by looking,
+            rather than by comparing behaviour against what was expected. */}
+        <div className="privacy build-id" title="Build this page was served from">
+          {buildId()}
+        </div>
         <div className="spacer" />
         <div className="actions">
           {clips.length > 0 && (

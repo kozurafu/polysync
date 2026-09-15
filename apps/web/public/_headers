@@ -1,0 +1,14 @@
+# index.html is the only unhashed file in the build, and it decides which
+# hashed assets the page asks for. A browser that caches it keeps requesting
+# the previous build's filenames and serves that entire old app — which looks
+# identical to running an old deploy, and is why a bug report once had to have
+# its build inferred from which sections it happened to contain.
+#
+# Everything else is content-hashed, so it can be cached forever: a changed
+# file gets a changed name.
+/index.html
+  Cache-Control: no-cache, must-revalidate
+/
+  Cache-Control: no-cache, must-revalidate
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

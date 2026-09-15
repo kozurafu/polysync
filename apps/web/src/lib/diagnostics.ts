@@ -72,6 +72,18 @@ const MAX_NEAR_MISSES = 25;
  */
 const IMPLAUSIBLE_DRIFT_PPM = 500;
 
+/**
+ * Which build produced this report.
+ *
+ * `index.html` is the one unhashed file in the bundle, so a browser holding a
+ * cached copy of it serves the whole previous app — indistinguishable, from
+ * the outside, from someone running an old deploy. Stamping the build removes
+ * the guesswork: a report now states its own provenance.
+ */
+export function buildId(): string {
+  return typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
+}
+
 export function buildDiagnosticReport(input: DiagnosticInput): string {
   const out: string[] = [];
   const line = (s = '') => out.push(s);
@@ -82,6 +94,7 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
   };
 
   line('POLYSYNC DIAGNOSTIC REPORT');
+  line(`build      ${buildId()}`);
   line(`generated  ${input.generatedAt}`);
   line('contains file names and folder paths, and no audio of any kind');
 

@@ -66,6 +66,15 @@ describe('buildDiagnosticReport', () => {
     expect(report).not.toMatch(/peaks|samples|Float32|Float64|waveform|envelope/i);
   });
 
+  it('states which build produced it', () => {
+    // index.html is the one unhashed file in the bundle, so a browser holding
+    // a cached copy serves the whole previous app — indistinguishable from
+    // outside from someone running an old deploy. One report had to have its
+    // build inferred from which sections it happened to contain, which cost a
+    // round trip. It now says so itself.
+    expect(buildDiagnosticReport(input())).toMatch(/^build {6}\S+/m);
+  });
+
   it('says up front what it does contain', () => {
     expect(buildDiagnosticReport(input())).toContain('no audio of any kind');
   });
