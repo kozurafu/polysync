@@ -30,6 +30,9 @@ const PORT = 4319;
  */
 const BASE = (process.argv.find((a) => a.startsWith('--base='))?.split('=')[1] ?? '').replace(/\/$/, '');
 
+/** `--workers=N` forwards `?workers=N` to the app, to A/B the align pool. */
+const WORKERS = process.argv.find((a) => a.startsWith('--workers='))?.split('=')[1];
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -291,7 +294,8 @@ async function main(): Promise<void> {
     });
     page.on('pageerror', (err) => consoleErrors.push(String(err)));
 
-    await page.goto(`http://localhost:${PORT}${BASE}/`, { waitUntil: 'networkidle' });
+    const query = WORKERS ? `?workers=${WORKERS}` : '';
+    await page.goto(`http://localhost:${PORT}${BASE}/${query}`, { waitUntil: 'networkidle' });
     console.log(`Loaded the app from http://localhost:${PORT}${BASE}/`);
 
     // Picking checks first, on an empty project, so they neither depend on nor

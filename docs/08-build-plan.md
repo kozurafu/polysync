@@ -289,8 +289,8 @@ Profiling one pair of ten-minute clips:
 
 The full-length correlation at 2 kHz is the solve. Gating around it can only remove whole pairs; it cannot make the pairs that survive any cheaper. So the remaining levers, in order of value:
 
-1. **The worker pool.** Pair alignment is embarrassingly parallel and the pool is already required for the browser app so the UI does not freeze. Four to eight cores is a 4–8× on the dominant cost — far more than either gate, for work that has to happen anyway.
-2. **A real-input FFT.** The signals are real and the transform is complex, which wastes about half the work. Roughly 2×, no behaviour change.
+1. **The worker pool.** Pair alignment is embarrassingly parallel. Built, and measured — see §7.5, which is also where the two estimates below turned out to be wrong.
+2. **A real-input FFT.** ~~The signals are real and the transform is complex, which wastes about half the work. Roughly 2×.~~ **Measured and wrong.** `gccPhat` runs *three* transforms — two forward, one inverse — and the real-input trick removes one of the three, not half of everything. Measured on a 600 s clip at 2 kHz: the FFTs are 81% of the call, one transform is 27% of it. So the ceiling is about **1.3×**, not 2×.
 3. **The fingerprint index**, still Phase 4. Constellation hashing over envelope peaks turns pair *discovery* into a hash lookup. This is the only thing on the list that changes the O(n²), and it is the answer for a full 200-clip day rather than a test.
 
 Leave the fingerprint index in Phase 4. Do the worker pool as part of the app.
@@ -376,6 +376,53 @@ Two lessons, and they are not the same one:
 - **"Compared zero pairs" is a broken run, not a result.** The report printed
   the three numbers that showed it and left them to be added up. It now says so
   outright.
+
+---
+
+## 7.5 The worker pool, measured
+
+Built, and it does far less than §7.2 predicted. That estimate — "four to eight
+cores is a 4–8× on the dominant cost" — ignored Amdahl's law, the cost of giving
+each worker the audio, and the memory ceiling. All three bite.
+
+**Measured**, 25 clips / 240 pairs, Chromium on a 4-core container:
+
+| | single-threaded | 3 workers |
+|---|---|---|
+| solve | 59.7 s | 48.4 s |
+| of which aligning | — | 35.2 s (73%) |
+
+That is **1.2×**, not 4–8×. Decomposing from runs at two worker counts:
+
+- parallelisable alignment work: **~53 s** — scales with workers
+- fixed cost *per worker*: **~20 s** — does not
+
+The fixed cost is each worker independently running `prepareClip` over every
+clip, plus receiving a copy of the audio. It is why the gain is small at this
+size and why it grows with pair count: alignment is O(n²) while the fixed cost
+is O(n), so the ratio improves as projects get bigger — up to the memory
+ceiling, which is the second problem.
+
+**The memory ceiling is the real limit.** The main thread *transfers* audio into
+the sync worker, so exactly one copy exists. A pool needs clones:
+
+    241 clips, 7.5 hours at the 16 kHz working rate = 3.4 GB per copy
+
+Eight of those is 27 GB against a tab ceiling nearer 2–4 GB. So `planAlignPool`
+sizes the pool against real memory, and the project that would benefit *most*
+from parallelism is exactly the one that cannot have it. It runs single-threaded
+instead — which is the right answer, but an ironic one.
+
+**What is worth keeping regardless**: the results are provably independent of
+worker count (`shard.test.ts` asserts byte-identical placements across 1, 2, 3
+and 8 shards), a dead worker costs time rather than correctness, `?workers=N`
+forces any count for comparison, and the report now separates align time from
+the rest of the solve — so the next attempt starts from measurement.
+
+**The next real lever** is that ~20 s fixed cost, not more workers. Preparing
+each clip once and sharing the result would remove most of it, but sharing means
+either nested workers (Safari support is recent) or `SharedArrayBuffer` (which
+needs COOP/COEP, and would rule out third-party embeds).
 
 ---
 

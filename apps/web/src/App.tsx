@@ -28,6 +28,7 @@ import {
   type TrackLayout,
 } from './lib/exportProject.ts';
 import { buildDiagnosticReport, buildId, probeEnvironment } from './lib/diagnostics.ts';
+import type { PoolBudget } from './lib/alignPool.ts';
 import { Timeline, formatClock } from './components/Timeline.tsx';
 
 type Phase = 'idle' | 'ingesting' | 'ready' | 'syncing' | 'solved';
@@ -46,7 +47,10 @@ export function App() {
   const [mediaRoot, setMediaRoot] = useState('');
   const [trackLayout, setTrackLayout] = useState<TrackLayout>('per-device');
   const [rate, setRate] = useState<FrameRate | null>(null);
-  const [timings, setTimings] = useState<{ ingestSeconds?: number; solveSeconds?: number }>({});
+  const [timings, setTimings] = useState<{ ingestSeconds?: number; solveSeconds?: number; alignSeconds?: number }>({});
+  // How the align pool was sized, so a slow solve can be explained from the
+  // report rather than guessed at from the machine it ran on.
+  const [poolPlan, setPoolPlan] = useState<PoolBudget | null>(null);
   const [report, setReport] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [ignored, setIgnored] = useState<string[]>([]);
@@ -169,6 +173,8 @@ export function App() {
     const started = performance.now();
     try {
       const solved = await solve(working, deviceOf, {
+        onPoolPlan: setPoolPlan,
+        onAlignSeconds: (seconds) => setTimings((t) => ({ ...t, alignSeconds: seconds })),
         onProgress: (fraction, label) => setProgress({ fraction, label }),
       });
       setTimings((t) => ({ ...t, solveSeconds: (performance.now() - started) / 1000 }));
@@ -263,6 +269,7 @@ export function App() {
         timings,
         rate,
         trackLayout,
+        poolPlan,
         settings: {
           projectName,
           frameRate: FRAME_RATES.find((r) => rate && sameRate(r.rate, rate))?.label ?? '25',
@@ -273,7 +280,7 @@ export function App() {
     setCopied(false);
   }, [
     picked, clips, failures, grouping, deviceOf, overrides,
-    result, timings, projectName, rate, mediaRoot, trackLayout,
+    result, timings, projectName, rate, mediaRoot, trackLayout, poolPlan,
   ]);
 
   const copyReport = useCallback(async () => {

@@ -14,8 +14,10 @@
 
 import type { ProbeResult } from '@polysync/media-io';
 import type { SyncResult } from '@polysync/sync-core';
+import { planAlignPool, projectAudioBytes, type PoolBudget } from './alignPool.ts';
 import type { IngestRequest, IngestResponse } from '../workers/ingest.worker.ts';
 import type { SyncRequest, SyncResponse } from '../workers/sync.worker.ts';
+import type { AlignResponse } from '../workers/align.worker.ts';
 
 export interface PickedFile {
   file: File;
@@ -170,14 +172,43 @@ export async function ingestFiles(
  * therefore needs a re-ingest, which is the honest trade for not holding a
  * second copy of the audio on the main thread.
  */
-export function solve(
+export async function solve(
   clips: IngestedClip[],
   deviceOf: (clipId: string) => string,
   options: {
     onProgress?: (fraction: number, label: string) => void;
     signal?: AbortSignal;
+    /** Records how the pool was sized, for the diagnostic report. */
+    onPoolPlan?: (plan: PoolBudget) => void;
+    /**
+     * Seconds spent in the align pool, separately from the rest of the solve.
+     *
+     * Reported because the two are the whole story of a slow solve: alignment
+     * is the part that scales with cores, everything after it does not, and
+     * without the split a disappointing total is unattributable.
+     */
+    onAlignSeconds?: (seconds: number) => void;
   } = {},
 ): Promise<SyncResult> {
+  // Spread pair alignment across cores when the machine can hold the copies.
+  // `planAlignPool` returns 1 whenever it cannot, and 1 means the code below
+  // runs exactly as it did before any of this existed — which is the point:
+  // a weak machine or an oversized project behaves as it always has rather
+  // than slightly differently.
+  const plan = planAlignPool({
+    audioBytes: projectAudioBytes(clips),
+    cores: navigator.hardwareConcurrency || 1,
+    deviceMemoryGb: (navigator as { deviceMemory?: number }).deviceMemory,
+    pairsToAlign: (clips.length * (clips.length - 1)) / 2,
+    override: workerOverride(),
+  });
+  options.onPoolPlan?.(plan);
+
+  const startedAlign = performance.now();
+  const precomputed =
+    plan.size > 1 ? await runAlignPool(clips, deviceOf, plan.size, options) : [];
+  if (plan.size > 1) options.onAlignSeconds?.((performance.now() - startedAlign) / 1000);
+
   return new Promise((resolve, reject) => {
     const worker = createSyncWorker();
     const transfer: Transferable[] = [];
@@ -199,6 +230,7 @@ export function solve(
           frameRate: clip.frameRate,
         };
       }),
+      precomputed,
     };
 
     const cleanup = () => worker.terminate();
@@ -227,6 +259,98 @@ export function solve(
     worker.postMessage(payload, transfer);
     for (const clip of clips) clip.samples = undefined; // detached; say so
   });
+}
+
+/**
+ * Run the pair alignment across a pool of workers.
+ *
+ * Each worker gets a *copy* of the audio — the main thread still needs its own
+ * for the solve that follows — which is why `planAlignPool` sized this against
+ * real memory before we got here. The copies are released as soon as each
+ * worker finishes, so the peak is brief.
+ *
+ * A worker that fails is not fatal. Anything it did not return is aligned by
+ * the solve itself, so a dead shard costs time and never correctness.
+ */
+/** `?workers=N` on the URL, for checking a result against another core count. */
+function workerOverride(): number | undefined {
+  try {
+    const raw = new URLSearchParams(location.search).get('workers');
+    if (raw === null) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function runAlignPool(
+  clips: IngestedClip[],
+  deviceOf: (clipId: string) => string,
+  shardCount: number,
+  options: { onProgress?: (fraction: number, label: string) => void; signal?: AbortSignal },
+): Promise<Array<{ i: number; j: number; pair: unknown }>> {
+  const payloadClips = clips.map((clip) => {
+    const samples = clip.samples;
+    if (!samples) throw new Error(`${clip.name}: audio was already handed to a solve`);
+    return {
+      id: clip.id,
+      name: clip.name,
+      trackId: deviceOf(clip.id),
+      samples,
+      sampleRate: clip.sampleRate,
+      timecodeSeconds: clip.timecodeSeconds,
+      recordedAtSeconds: clip.recordedAtSeconds,
+      recordedAtSource: clip.recordedAtSource,
+      frameRate: clip.frameRate,
+    };
+  });
+
+  const workers: Worker[] = [];
+  const progress = new Array<number>(shardCount).fill(0);
+  const stopAll = () => {
+    for (const worker of workers) worker.terminate();
+  };
+
+  try {
+    const shards = await Promise.all(
+      Array.from({ length: shardCount }, (_, shardIndex) => {
+        return new Promise<Array<{ i: number; j: number; pair: unknown }>>((resolveShard) => {
+          const worker = createAlignWorker();
+          workers.push(worker);
+
+          worker.onmessage = (event: MessageEvent<AlignResponse>) => {
+            const message = event.data;
+            if (message.type === 'progress') {
+              progress[shardIndex] = message.fraction;
+              const mean = progress.reduce((t, f) => t + f, 0) / shardCount;
+              // Alignment is the bulk of the solve, so it owns most of the bar.
+              options.onProgress?.(0.05 + 0.75 * mean, 'Matching clips');
+              return;
+            }
+            worker.terminate();
+            // A failed shard resolves empty: the solve aligns what it is not
+            // given, so the answer is the same and only the time is lost.
+            resolveShard(message.type === 'done' ? message.alignments : []);
+          };
+          worker.onerror = () => {
+            worker.terminate();
+            resolveShard([]);
+          };
+
+          // Copied, not transferred — every shard needs the whole project.
+          worker.postMessage({ clips: payloadClips, shardIndex, shardCount });
+        });
+      }),
+    );
+    return shards.flat();
+  } finally {
+    stopAll();
+  }
+}
+
+function createAlignWorker(): Worker {
+  return new Worker(new URL('../workers/align.worker.ts', import.meta.url), { type: 'module' });
 }
 
 function createIngestWorker(): Worker {

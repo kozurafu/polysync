@@ -6,13 +6,20 @@
  * minutes, and on the main thread the tab stops painting and the browser offers
  * to kill it. The user sees a crash, not a computation.
  *
- * The solve itself is still single-threaded. Sharding pair alignment across
- * workers is the next big lever (see `docs/08-build-plan.md` §7.2), but it needs
- * either the full-rate audio duplicated into every worker or the refinement pass
- * deferred, and neither is a change to make casually.
+ * Pair alignment may have happened elsewhere. When the machine can hold the
+ * copies, the main thread spreads it across a pool of align workers and passes
+ * the results in as `precomputed`; when it cannot, this worker does the whole
+ * solve itself exactly as it always has. Either way the answer is the same —
+ * the shards apply the same gates and align disjoint slices. See
+ * `alignPool.ts` for why the pool is not simply always on.
  */
 
-import { syncProject, type AudioClip, type SyncResult } from '@polysync/sync-core';
+import {
+  syncProject,
+  type AudioClip,
+  type PairAlignment,
+  type SyncResult,
+} from '@polysync/sync-core';
 
 export interface SyncRequest {
   clips: Array<{
@@ -26,6 +33,11 @@ export interface SyncRequest {
     recordedAtSource?: 'metadata' | 'filesystem';
     frameRate?: number;
   }>;
+  /**
+   * Pairs already aligned by the worker pool, if one ran. Anything absent is
+   * aligned here as normal, so a shard that died costs time, not correctness.
+   */
+  precomputed?: Array<{ i: number; j: number; pair: unknown }>;
 }
 
 export type SyncResponse =
@@ -51,8 +63,14 @@ self.onmessage = (event: MessageEvent<SyncRequest>) => {
       frameRate: c.frameRate,
     }));
 
+    const precomputedPairs = new Map<string, PairAlignment>();
+    for (const { i, j, pair } of event.data.precomputed ?? []) {
+      precomputedPairs.set(`${i}:${j}`, pair as PairAlignment);
+    }
+
     let lastPosted = -1;
     const result = syncProject(clips, {
+      precomputedPairs,
       onProgress: (fraction, label) => {
         // The solve reports far more often than a UI can usefully paint, and
         // every message is a structured clone.

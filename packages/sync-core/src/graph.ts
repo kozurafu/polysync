@@ -17,6 +17,15 @@ import type {
 } from './types.js';
 
 export interface SyncOptions extends AlignOptions, GateOptions {
+  /**
+   * Alignments computed elsewhere, keyed `\`${i}:${j}\`` over clip indices.
+   *
+   * How a worker pool feeds its results back in. Any pair not supplied is
+   * aligned here as normal, so a shard that failed or never ran costs time
+   * rather than correctness — the solve cannot silently lose a pair because a
+   * worker died.
+   */
+  precomputedPairs?: ReadonlyMap<string, PairAlignment>;
   /** Measure and report per-pair clock drift. Costs one extra pass per accepted edge. */
   detectDrift: boolean;
   drift: DriftOptions;
@@ -86,6 +95,98 @@ class UnionFind {
  */
 const SAME_DEVICE_TOLERANCE_SECONDS = 0.02;
 
+/** What a gate decided about one pair. */
+interface GateDecision {
+  skipped: 'same-device' | 'recording-time' | 'envelope' | null;
+  bound: number;
+}
+
+/**
+ * Apply the gates to one pair.
+ *
+ * Factored out because two callers must agree exactly on which pairs get
+ * aligned: the solve itself, and `alignShard`, which spreads that alignment
+ * across a worker pool. If the two ever disagreed about a gate, a pair would be
+ * silently dropped or aligned twice — so they share the decision rather than
+ * each implementing it.
+ */
+function screen(
+  prepared: PreparedClip[],
+  timeAllowed: boolean[][] | undefined,
+  i: number,
+  j: number,
+  opts: SyncOptions,
+): GateDecision {
+  if (!opts.allowSameDeviceMatches && isSameDevice(prepared[i], prepared[j])) {
+    // A camera records one clip at a time, so these cannot share a sound
+    // however well they correlate. See gates.ts.
+    return { skipped: 'same-device', bound: 0 };
+  }
+  if (timeAllowed && !timeAllowed[i][j]) return { skipped: 'recording-time', bound: 0 };
+  if (opts.envelopePrefilter) {
+    const bound = maxEnvelopeCorrelation(prepared[i], prepared[j], opts.minOverlapSeconds).r;
+    if (bound < opts.minQuality - opts.prefilterMargin) return { skipped: 'envelope', bound };
+    return { skipped: null, bound };
+  }
+  return { skipped: null, bound: 0 };
+}
+
+/** One pair's alignment, addressed by the clip indices it came from. */
+export interface ShardedAlignment {
+  i: number;
+  j: number;
+  pair: PairAlignment;
+}
+
+/**
+ * Align every `shardCount`-th surviving pair, starting at `shardIndex`.
+ *
+ * The expensive part of a solve is pair alignment, and pairs are independent of
+ * one another — so this is the part worth spreading across cores. Each shard
+ * walks the same pair order and applies the same gates, then aligns only the
+ * pairs whose ordinal belongs to it. Interleaving rather than splitting into
+ * contiguous blocks matters: alignment cost scales with clip length, and a
+ * contiguous split hands one shard all the long clips.
+ *
+ * Feeding the results back through `syncProject`'s `precomputedPairs` produces
+ * exactly what the single-threaded path would have, because the gates and the
+ * alignment are the same code either way.
+ */
+export function alignShard(
+  clips: AudioClip[],
+  options: Partial<SyncOptions>,
+  shardIndex: number,
+  shardCount: number,
+): ShardedAlignment[] {
+  const opts: SyncOptions = { ...DEFAULT_SYNC_OPTIONS, ...options };
+  const prepared = clips.map((c) => prepareClip(c, opts));
+  const timeAllowed = opts.gateByRecordingTime
+    ? recordingTimeMatrix(prepared, opts.recordingTimeSlopSeconds)
+    : undefined;
+
+  const out: ShardedAlignment[] = [];
+  const n = clips.length;
+  let ordinal = 0;
+  let mine = 0;
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (screen(prepared, timeAllowed, i, j, opts).skipped !== null) continue;
+      total++;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (screen(prepared, timeAllowed, i, j, opts).skipped !== null) continue;
+      if (ordinal++ % shardCount !== shardIndex) continue;
+      out.push({ i, j, pair: alignPair(prepared[i], prepared[j], opts) });
+      mine++;
+      opts.onProgress?.(mine / Math.max(1, Math.ceil(total / shardCount)), 'Matching clips');
+    }
+  }
+  return out;
+}
+
 export function syncProject(
   clips: AudioClip[],
   options: Partial<SyncOptions> = {},
@@ -137,19 +238,9 @@ export function syncProject(
       // audio at all, and establishing that with a full alignment is the
       // dominant cost of the whole solve. Neither gate may reject a pair that
       // would have matched — see gates.ts for why each one cannot.
-      let skipped: 'same-device' | 'recording-time' | 'envelope' | null = null;
-      let bound = 0;
-
-      if (!opts.allowSameDeviceMatches && isSameDevice(prepared[i], prepared[j])) {
-        // A camera records one clip at a time, so these cannot share a sound
-        // however well they correlate. See gates.ts.
-        skipped = 'same-device';
-      } else if (timeAllowed && !timeAllowed[i][j]) {
-        skipped = 'recording-time';
-      } else if (opts.envelopePrefilter) {
-        bound = maxEnvelopeCorrelation(prepared[i], prepared[j], opts.minOverlapSeconds).r;
-        if (bound < opts.minQuality - opts.prefilterMargin) skipped = 'envelope';
-      }
+      const gate = screen(prepared, timeAllowed, i, j, opts);
+      const skipped = gate.skipped;
+      const bound = gate.bound;
 
       if (skipped === 'same-device') {
         stats.skippedBySameDevice++;
@@ -161,7 +252,10 @@ export function syncProject(
         stats.skippedByEnvelope++;
         pairs.push(rejectedPair(prepared[i], prepared[j], bound));
       } else {
-        pairs.push(alignPair(prepared[i], prepared[j], opts));
+        // A pool may have aligned this pair already. Falling back to aligning
+        // it here means a shard that failed costs time, never correctness.
+        const ready = opts.precomputedPairs?.get(`${i}:${j}`);
+        pairs.push(ready ?? alignPair(prepared[i], prepared[j], opts));
         stats.aligned++;
       }
       done++;

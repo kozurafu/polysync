@@ -55,8 +55,10 @@ export interface DiagnosticInput {
   deviceOf: (clipId: string) => string;
   overrides: Record<string, string>;
   result: SyncResult | null;
-  timings: { ingestSeconds?: number; solveSeconds?: number };
+  timings: { ingestSeconds?: number; solveSeconds?: number; alignSeconds?: number };
   settings: { projectName: string; frameRate: string; mediaRoot: string };
+  /** How pair alignment was spread across cores, or why it was not. */
+  poolPlan?: { size: number; reason: string } | null;
   /** Needed to show what the export would actually write. */
   rate: FrameRate | null;
   trackLayout: TrackLayout;
@@ -196,6 +198,20 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
   heading('TIMING');
   line(`decode             ${seconds(input.timings.ingestSeconds)}`);
   line(`solve              ${seconds(input.timings.solveSeconds)}`);
+  // Why the solve took what it took. Pair alignment dominates, and whether it
+  // was spread across cores is the single biggest factor — so the report says
+  // what was decided and why, rather than leaving a slow run unexplained.
+  if (input.timings.alignSeconds !== undefined) {
+    const total = input.timings.solveSeconds;
+    const share = total ? ` (${((input.timings.alignSeconds / total) * 100).toFixed(0)}% of the solve)` : '';
+    line(`  of which aligning  ${seconds(input.timings.alignSeconds)}${share}`);
+  }
+  if (input.poolPlan) {
+    line(
+      `align workers      ${input.poolPlan.size === 1 ? '1 (single-threaded)' : input.poolPlan.size}`,
+    );
+    line(`  ${input.poolPlan.reason}`);
+  }
   if (input.result && input.result.stats.aligned > 0 && input.timings.solveSeconds) {
     const per = (input.timings.solveSeconds / input.result.stats.aligned) * 1000;
     line(`per pair compared  ${per.toFixed(0)} ms  (${input.result.stats.aligned} pairs)`);
