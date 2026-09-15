@@ -71,6 +71,18 @@ describe('the ?workers= override', () => {
     expect(plan({ override: 4, cores: 1 }).size).toBe(4);
   });
 
+  it('says which of the two ways it was set', () => {
+    // A screenshot caught this: the button was pressed and the note blamed the
+    // URL. Telling someone the wrong cause is worse than telling them nothing.
+    expect(plan({ override: 1, overrideSource: 'setting' }).reason).toContain('Processing setting');
+    expect(plan({ override: 1, overrideSource: 'url' }).reason).toContain('?workers=');
+  });
+
+  it('marks a chosen count as chosen, so the UI can stay quiet about it', () => {
+    expect(plan({ override: 1, overrideSource: 'setting' }).forced).toBe(true);
+    expect(plan({ audioBytes: 9 * GB }).forced).toBeFalsy();
+  });
+
   it('will not be talked into something absurd', () => {
     expect(plan({ override: 0 }).size).toBe(1);
     expect(plan({ override: -3 }).size).toBe(1);

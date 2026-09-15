@@ -188,6 +188,13 @@ export async function solve(
      * without the split a disappointing total is unattributable.
      */
     onAlignSeconds?: (seconds: number) => void;
+    /**
+     * Worker count the user asked for, from the UI toggle. `?workers=` on the
+     * URL still wins: that one exists for support, and someone reading a
+     * troubleshooting note should not have it silently overruled by a setting
+     * they forgot they changed.
+     */
+    workers?: number;
   } = {},
 ): Promise<SyncResult> {
   // Spread pair alignment across cores when the machine can hold the copies.
@@ -200,7 +207,8 @@ export async function solve(
     cores: navigator.hardwareConcurrency || 1,
     deviceMemoryGb: (navigator as { deviceMemory?: number }).deviceMemory,
     pairsToAlign: (clips.length * (clips.length - 1)) / 2,
-    override: workerOverride(),
+    override: workerOverride() ?? options.workers,
+    overrideSource: workerOverride() !== undefined ? 'url' : 'setting',
   });
   options.onPoolPlan?.(plan);
 

@@ -261,6 +261,42 @@ async function checkXmlExport(
   return ok;
 }
 
+/**
+ * The Processing control: does clicking it actually change what the next solve
+ * does? A toggle that looks right and changes nothing is worse than none.
+ */
+async function checkCoreToggle(page: import('playwright').Page): Promise<boolean> {
+  const single = page.locator('.seg button:has-text("Single core")');
+  const all = page.locator('.seg button:has-text("Use all cores")');
+  if ((await single.count()) === 0) {
+    console.error('FAIL: no core-count control on the page');
+    return false;
+  }
+
+  await single.click();
+  if ((await single.getAttribute('aria-pressed')) !== 'true') {
+    console.error('FAIL: clicking Single core did not select it');
+    return false;
+  }
+
+  // Re-run and read what the solve actually did, not what the button says.
+  await page.click('button:has-text("Synchronize")');
+  await page.waitForSelector('.pill', { timeout: 300_000 });
+  await page.click('button:has-text("Diagnostics")');
+  await page.waitForSelector('pre.report', { timeout: 30_000 });
+  const forced = (await page.locator('pre.report').textContent()) ?? '';
+  const usedOne = /align workers\s+1 \(single-threaded\)/.test(forced);
+  console.log(`Single core forces one worker: ${usedOne ? 'yes' : 'NO'}`);
+  if (!usedOne) {
+    console.error('FAIL: the control did not change the solve');
+    return false;
+  }
+
+  await all.click();
+  console.log(`Switching back is available: ${(await all.getAttribute('aria-pressed')) === 'true' ? 'yes' : 'NO'}`);
+  return (await all.getAttribute('aria-pressed')) === 'true';
+}
+
 async function main(): Promise<void> {
   const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
   const root = resolve(positional[0] ?? './sample-shoot');
@@ -371,6 +407,7 @@ async function main(): Promise<void> {
     }
 
     if (!(await checkXmlExport(page, rows.length, files, root))) failed = true;
+    if (!(await checkCoreToggle(page))) failed = true;
 
     await page.screenshot({ path: 'apps/web/smoke.png', fullPage: true });
     console.log('  Screenshot: apps/web/smoke.png');

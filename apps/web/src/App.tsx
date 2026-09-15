@@ -29,6 +29,7 @@ import {
 } from './lib/exportProject.ts';
 import { buildDiagnosticReport, buildId, probeEnvironment } from './lib/diagnostics.ts';
 import type { PoolBudget } from './lib/alignPool.ts';
+import { loadCoreMode, saveCoreMode, workersFor, type CoreMode } from './lib/coreMode.ts';
 import { Timeline, formatClock } from './components/Timeline.tsx';
 
 type Phase = 'idle' | 'ingesting' | 'ready' | 'syncing' | 'solved';
@@ -51,6 +52,12 @@ export function App() {
   // How the align pool was sized, so a slow solve can be explained from the
   // report rather than guessed at from the machine it ran on.
   const [poolPlan, setPoolPlan] = useState<PoolBudget | null>(null);
+  const [coreMode, setCoreMode] = useState<CoreMode>(loadCoreMode);
+
+  const chooseCoreMode = useCallback((mode: CoreMode) => {
+    setCoreMode(mode);
+    saveCoreMode(mode);
+  }, []);
   const [report, setReport] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [ignored, setIgnored] = useState<string[]>([]);
@@ -174,6 +181,7 @@ export function App() {
     try {
       const solved = await solve(working, deviceOf, {
         onPoolPlan: setPoolPlan,
+        workers: workersFor(coreMode),
         onAlignSeconds: (seconds) => setTimings((t) => ({ ...t, alignSeconds: seconds })),
         onProgress: (fraction, label) => setProgress({ fraction, label }),
       });
@@ -184,7 +192,7 @@ export function App() {
       setError(e instanceof Error ? e.message : String(e));
       setPhase('ready');
     }
-  }, [clips, picked, deviceOf]);
+  }, [clips, picked, deviceOf, coreMode]);
 
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
@@ -270,6 +278,7 @@ export function App() {
         rate,
         trackLayout,
         poolPlan,
+        coreMode,
         settings: {
           projectName,
           frameRate: FRAME_RATES.find((r) => rate && sameRate(r.rate, rate))?.label ?? '25',
@@ -280,7 +289,7 @@ export function App() {
     setCopied(false);
   }, [
     picked, clips, failures, grouping, deviceOf, overrides,
-    result, timings, projectName, rate, mediaRoot, trackLayout, poolPlan,
+    result, timings, projectName, rate, mediaRoot, trackLayout, poolPlan, coreMode,
   ]);
 
   const copyReport = useCallback(async () => {
@@ -592,6 +601,53 @@ export function App() {
               ))}
             </ul>
           </div>
+        )}
+
+        {clips.length > 0 && !busy && (
+          <section className="panel">
+            <h2>Processing</h2>
+            <div className="panel-body">
+              <div className="coremode">
+                <div className="seg" role="group" aria-label="How many cores to use">
+                  <button
+                    type="button"
+                    className={coreMode === 'all' ? 'on' : ''}
+                    aria-pressed={coreMode === 'all'}
+                    onClick={() => chooseCoreMode('all')}
+                  >
+                    Use all cores
+                  </button>
+                  <button
+                    type="button"
+                    className={coreMode === 'single' ? 'on' : ''}
+                    aria-pressed={coreMode === 'single'}
+                    onClick={() => chooseCoreMode('single')}
+                  >
+                    Single core
+                  </button>
+                </div>
+                {poolPlan && (
+                  <span className="coremode-actual">
+                    Last run used{' '}
+                    <b>{poolPlan.size === 1 ? '1 core' : `${poolPlan.size} cores`}</b>
+                  </span>
+                )}
+              </div>
+              <p className="help" style={{ margin: '10px 0 0', maxWidth: '68ch' }}>
+                Matching clips is the slow part, and it can be split across your processor's
+                cores. <em>Use all cores</em> is faster and is the normal setting.{' '}
+                <em>Single core</em> does exactly the same work one piece at a time — slower, but
+                it is the oldest and most-tested path through the app. If a sync ever comes out
+                wrong, run it again on a single core: the answer should be identical, and if it
+                is not, that is worth telling us about.
+              </p>
+              {coreMode === 'all' && poolPlan?.size === 1 && !poolPlan.forced && (
+                <p className="help" style={{ margin: '8px 0 0', maxWidth: '68ch' }}>
+                  This project ran on one core anyway — {poolPlan.reason}.
+                </p>
+              )}
+            </div>
+          </section>
         )}
 
         {clips.length > 0 && !busy && (

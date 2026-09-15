@@ -57,6 +57,8 @@ export interface DiagnosticInput {
   result: SyncResult | null;
   timings: { ingestSeconds?: number; solveSeconds?: number; alignSeconds?: number };
   settings: { projectName: string; frameRate: string; mediaRoot: string };
+  /** What the user chose in the Processing control, if anything. */
+  coreMode?: 'all' | 'single';
   /** How pair alignment was spread across cores, or why it was not. */
   poolPlan?: { size: number; reason: string } | null;
   /** Needed to show what the export would actually write. */
@@ -206,6 +208,7 @@ export function buildDiagnosticReport(input: DiagnosticInput): string {
     const share = total ? ` (${((input.timings.alignSeconds / total) * 100).toFixed(0)}% of the solve)` : '';
     line(`  of which aligning  ${seconds(input.timings.alignSeconds)}${share}`);
   }
+  if (input.coreMode) line(`core setting      ${input.coreMode === 'single' ? 'single core (chosen by the user)' : 'all cores'}`);
   if (input.poolPlan) {
     line(
       `align workers      ${input.poolPlan.size === 1 ? '1 (single-threaded)' : input.poolPlan.size}`,

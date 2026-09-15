@@ -38,6 +38,13 @@ export interface PoolBudget {
   size: number;
   /** Why, in words — shown in the diagnostic report. */
   reason: string;
+  /**
+   * True when a person asked for this count rather than the budget deciding it.
+   *
+   * The difference matters to the UI: "your machine could not manage more" is
+   * worth telling someone, and "you pressed the button that does this" is not.
+   */
+  forced?: boolean;
 }
 
 /**
@@ -73,10 +80,13 @@ export function planAlignPool(input: {
    * demand, which is the first thing to try when a result looks wrong.
    */
   override?: number;
+  /** Where the override came from, so the report can attribute it correctly. */
+  overrideSource?: 'url' | 'setting';
 }): PoolBudget {
   if (input.override !== undefined && Number.isFinite(input.override)) {
     const forced = Math.max(1, Math.min(Math.floor(input.override), MAX_WORKERS));
-    return { size: forced, reason: `forced to ${forced} by ?workers= on the URL` };
+    const from = input.overrideSource === 'url' ? '?workers= on the URL' : 'the Processing setting';
+    return { size: forced, reason: `set to ${forced} by ${from}`, forced: true };
   }
   const cores = Math.max(1, Math.floor(input.cores || 1));
   if (cores < 3) {
