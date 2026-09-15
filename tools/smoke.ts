@@ -17,7 +17,10 @@ import { chromium, type Browser } from 'playwright';
 
 // POLYSYNC_DIST points the test at any built copy — used to verify the
 // distributable zip itself, not just the folder it was made from.
-const DIST = resolve(process.env.POLYSYNC_DIST ?? 'apps/web/dist');
+// `??` would accept an empty string and quietly serve the working directory
+// instead, which looks exactly like the app being broken: every picking check
+// fails because there is no app. `||` falls back on empty too.
+const DIST = resolve(process.env.POLYSYNC_DIST || 'apps/web/dist');
 const PORT = 4319;
 
 /**
@@ -298,6 +301,14 @@ async function checkCoreToggle(page: import('playwright').Page): Promise<boolean
 }
 
 async function main(): Promise<void> {
+  // Fail loudly rather than serving 404s that read as application bugs.
+  try {
+    await stat(join(DIST, 'index.html'));
+  } catch {
+    console.error(`No built app at ${DIST}\nRun:  npm run build`);
+    process.exit(2);
+  }
+
   const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
   const root = resolve(positional[0] ?? './sample-shoot');
   try {
